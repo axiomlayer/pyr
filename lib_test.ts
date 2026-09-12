@@ -530,7 +530,11 @@ Deno.test("init with no name refuses the home directory", async () => {
 });
 
 Deno.test("init with no name refuses a filesystem root", async () => {
-  const root = isWindows() ? "C:\\" : "/";
+  // Derive the drive from cwd instead of assuming C: exists. Windows can boot
+  // from another letter, and a cwd that does not exist stops the subprocess
+  // from starting at all, failing the suite before the guard is exercised.
+  const drive = Deno.cwd().match(/^[a-zA-Z]:/)?.[0];
+  const root = isWindows() ? `${drive ?? "C:"}\\` : "/";
   const result = await runPyr(root, ["init"]);
   assertEquals(result.code, 1);
   assertMatch(result.stderr, /refusing to init in your root directory/);
