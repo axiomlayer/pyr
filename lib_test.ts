@@ -1,4 +1,5 @@
 import { assertEquals, assertMatch } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { fromFileUrl } from "https://deno.land/std@0.224.0/path/mod.ts";
 import {
   addPyprojectDep,
   basename,
@@ -9,6 +10,7 @@ import {
   managedPython,
   parseRequirementName,
   platformTriple,
+  protectedInitDir,
   pyproject,
   pyrHome,
   readLock,
@@ -424,18 +426,24 @@ Deno.test("writeLock with empty input writes header only", async () => {
 /** Run `deno run -A main.ts <args>` from `cwd`, capturing stdout/stderr/code.
  *  Used to test guards that call Deno.exit, which would terminate the test
  *  runner if invoked in-process. */
-async function runPyr(cwd: string, args: string[]): Promise<{
+async function runPyr(
+  cwd: string,
+  args: string[],
+  env?: Record<string, string>,
+): Promise<{
   code: number;
   stdout: string;
   stderr: string;
 }> {
-  const repoRoot = new URL("./main.ts", import.meta.url).pathname.replace(
-    /\/main\.ts$/,
-    "",
-  );
+  // fromFileUrl, not URL.pathname: on Windows the latter yields "/C:/..." which
+  // Deno can load but won't discover deno.json from. Pass --config explicitly
+  // so resolution never depends on the subprocess cwd (always a temp dir).
+  const mainTs = fromFileUrl(new URL("./main.ts", import.meta.url));
+  const config = fromFileUrl(new URL("./deno.json", import.meta.url));
   const cmd = new Deno.Command(Deno.execPath(), {
-    args: ["run", "-A", `${repoRoot}/main.ts`, ...args],
+    args: ["run", "-A", "--config", config, mainTs, ...args],
     cwd,
+    env,
     stdout: "piped",
     stderr: "piped",
   });
@@ -471,6 +479,50 @@ Deno.test("init refuses to overwrite sentinel files in cwd", async () => {
     await Deno.remove(tmp, { recursive: true });
   }
 });
+
+Deno.test("protectedInitDir flags home and roots, not ordinary dirs", () => {
+  assertEquals(protectedInitDir("/home/jasen", "/home/jasen"), "home");
+  assertEquals(protectedInitDir("/home/jasen/", "/home/jasen"), "home");
+  assertEquals(protectedInitDir("/home/jasen/dev/proj", "/home/jasen"), null);
+  assertEquals(protectedInitDir("/home/jasen", undefined), null);
+  assertEquals(protectedInitDir("/", "/home/jasen"), "root");
+  assertEquals(protectedInitDir("C:\\", "C:\\Users\\jasen"), "root");
+  assertEquals(protectedInitDir("C:\\Users\\jasen", "C:/Users/jasen/"), "home");
+  assertEquals(protectedInitDir("C:\\Users\\jasen\\dev", "C:\\Users\\jasen"), null);
+  if (isWindows()) {
+    assertEquals(protectedInitDir("c:\\users\\JASEN", "C:\\Users\\jasen"), "home");
+  }
+});
+
+Deno.test("init with no name refuses the home directory", async () => {
+  const tmp = await Deno.makeTempDir();
+  try {
+    // Point both home variables at the temp dir and run from inside it.
+    const result = await runPyr(tmp, ["init"], { HOME: tmp, USERPROFILE: tmp });
+    assertEquals(result.code, 1);
+    assertMatch(result.stderr, /refusing to init in your home directory/);
+    assertMatch(result.stderr, /pyr init <name>/);
+    assertEquals(await exists(`${tmp}/pyproject.toml`), false);
+  } finally {
+    await Deno.remove(tmp, { recursive: true });
+  }
+});
+
+Deno.test("init with no name refuses a filesystem root", async () => {
+  const root = isWindows() ? "C:\\" : "/";
+  const result = await runPyr(root, ["init"]);
+  assertEquals(result.code, 1);
+  assertMatch(result.stderr, /refusing to init in your root directory/);
+});
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 Deno.test("run errors when app/main.py is missing", async () => {
   const tmp = await Deno.makeTempDir();

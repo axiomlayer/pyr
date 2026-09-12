@@ -6,17 +6,38 @@ import denoConfig from "./deno.json" with { type: "json" };
 export const PYR_VERSION: string = denoConfig.version;
 export const PYR_REPO = "jasenc7/pyr";
 
+/** The user's home directory: $HOME, then $USERPROFILE (Windows). */
+export function userHome(): string | undefined {
+  return Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE");
+}
+
 /** Returns the pyr home dir. Honors PYR_HOME, falls back to $HOME/.pyr,
  *  then $USERPROFILE/.pyr (Windows). Throws if no home can be determined. */
 export function pyrHome(): string {
   const explicit = Deno.env.get("PYR_HOME");
   if (explicit) return explicit;
-  const home = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE");
+  const home = userHome();
   if (!home) throw new Error("cannot determine home directory");
   return `${home}/.pyr`;
 }
 
 export const PYR_HOME = pyrHome();
+
+/** Why `pyr init` (no name) must not scaffold into `cwd`: "home" if it is the
+ *  user's home directory, "root" if it is a filesystem root, else null.
+ *  Pure string comparison; callers pass already-resolved paths. Separators are
+ *  normalized on every platform; case is folded only on Windows. */
+export function protectedInitDir(cwd: string, home?: string): "home" | "root" | null {
+  const norm = (p: string) => {
+    let s = p.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (isWindows()) s = s.toLowerCase();
+    return s;
+  };
+  const c = norm(cwd);
+  if (c === "" || /^[a-zA-Z]:$/.test(c)) return "root";
+  if (home !== undefined && norm(home) !== "" && c === norm(home)) return "home";
+  return null;
+}
 
 // --- platform ---
 
@@ -121,6 +142,24 @@ export async function init(name?: string) {
       // doesn't exist yet — fine, we'll create it
     }
   } else {
+    // `pyr init` with no name adopts cwd as the project. Running that in $HOME
+    // (or a drive root) silently turns the whole tree into a project named
+    // after the user, so refuse before touching anything. Resolve symlinks and
+    // canonical case first; fall back to the raw strings if either can't be.
+    const real = (p: string) => {
+      try {
+        return Deno.realPathSync(p);
+      } catch {
+        return p;
+      }
+    };
+    const home = userHome();
+    const why = protectedInitDir(real(Deno.cwd()), home === undefined ? undefined : real(home));
+    if (why) {
+      console.error(`refusing to init in your ${why} directory`);
+      console.error("run `pyr init <name>` to create a new project in a subdirectory");
+      Deno.exit(1);
+    }
     for (const sentinel of ["pyproject.toml", "requirements.txt", "app/main.py"]) {
       try {
         await Deno.stat(sentinel);

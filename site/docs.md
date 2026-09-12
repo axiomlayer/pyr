@@ -72,7 +72,7 @@ prunes anything no longer needed, and rewrites the lock. `pyr run` auto-syncs if
 
 | command                | what it does                                                                       |
 | ---------------------- | ---------------------------------------------------------------------------------- |
-| `pyr init [name]`      | Scaffold a project in `./<name>/` (or cwd). Refuses to overwrite existing content. |
+| `pyr init [name]`      | Scaffold a project in `./<name>/` (or cwd). Refuses existing content, `$HOME`, roots. |
 | `pyr run [-- args]`    | Run `app/main.py` in the venv with `PYTHONPATH=.`. Args after `--` go to python.   |
 | `pyr add <pkg>...`     | Add packages to `pyproject.toml [project].dependencies`, then sync.                |
 | `pyr remove <pkg>...`  | Remove packages from `pyproject.toml`, then sync.                                  |
