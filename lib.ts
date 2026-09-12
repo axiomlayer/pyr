@@ -174,8 +174,17 @@ export async function init(name?: string) {
         return p;
       }
     };
-    const home = userHome();
-    const why = protectedInitDir(real(Deno.cwd()), home === undefined ? undefined : real(home));
+    // HOME and USERPROFILE can point at different directories in the same
+    // process (e.g. Git Bash sets HOME while Windows still populates
+    // USERPROFILE) — userHome()'s `??` only ever checks the first one set, so
+    // an init run from whichever it didn't pick would slip the guard. Check
+    // cwd against both.
+    const cwdReal = real(Deno.cwd());
+    let why: "home" | "root" | null = null;
+    for (const h of [Deno.env.get("HOME"), Deno.env.get("USERPROFILE")]) {
+      why = protectedInitDir(cwdReal, h === undefined ? undefined : real(h));
+      if (why) break;
+    }
     if (why) {
       console.error(`refusing to init in your ${why} directory`);
       console.error("run `pyr init <name>` to create a new project in a subdirectory");

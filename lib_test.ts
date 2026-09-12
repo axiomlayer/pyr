@@ -529,6 +529,23 @@ Deno.test("init with no name refuses the home directory", async () => {
   }
 });
 
+Deno.test("init with no name refuses USERPROFILE even when HOME differs", async () => {
+  // Regression for the case userHome()'s `??` misses: HOME and USERPROFILE
+  // set to different directories. Running from the one HOME doesn't point at
+  // must still be refused.
+  const home = await Deno.makeTempDir();
+  const profile = await Deno.makeTempDir();
+  try {
+    const result = await runPyr(profile, ["init"], { HOME: home, USERPROFILE: profile });
+    assertEquals(result.code, 1);
+    assertMatch(result.stderr, /refusing to init in your home directory/);
+    assertEquals(await exists(`${profile}/pyproject.toml`), false);
+  } finally {
+    await Deno.remove(home, { recursive: true });
+    await Deno.remove(profile, { recursive: true });
+  }
+});
+
 Deno.test("init with no name refuses a filesystem root", async () => {
   // Derive the drive from cwd instead of assuming C: exists. Windows can boot
   // from another letter, and a cwd that does not exist stops the subprocess
