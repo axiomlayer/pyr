@@ -494,6 +494,27 @@ Deno.test("protectedInitDir flags home and roots, not ordinary dirs", () => {
   }
 });
 
+Deno.test("protectedInitDir flags UNC and extended-length roots", () => {
+  // A share root is as unsafe to scaffold into as a drive root.
+  assertEquals(protectedInitDir("\\\\server\\share", "C:\\Users\\jasen"), "root");
+  assertEquals(protectedInitDir("\\\\server\\share\\", "C:\\Users\\jasen"), "root");
+  assertEquals(protectedInitDir("//server/share", "/home/jasen"), "root");
+  assertEquals(protectedInitDir("\\\\server", "C:\\Users\\jasen"), "root");
+  // Anything below the share is an ordinary directory.
+  assertEquals(protectedInitDir("\\\\server\\share\\proj", "C:\\Users\\jasen"), null);
+  assertEquals(protectedInitDir("//server/share/team/proj", "/home/jasen"), null);
+  // A home directory on a share is still home, not root.
+  assertEquals(
+    protectedInitDir("\\\\server\\share\\jasen", "\\\\server\\share\\jasen"),
+    "home",
+  );
+  // Extended-length prefixes unwrap to the same answers.
+  assertEquals(protectedInitDir("\\\\?\\C:\\", "C:\\Users\\jasen"), "root");
+  assertEquals(protectedInitDir("\\\\?\\C:\\Users\\jasen\\dev", "C:\\Users\\jasen"), null);
+  assertEquals(protectedInitDir("\\\\?\\UNC\\server\\share", "C:\\Users\\jasen"), "root");
+  assertEquals(protectedInitDir("\\\\?\\UNC\\server\\share\\proj", "C:\\Users\\jasen"), null);
+});
+
 Deno.test("init with no name refuses the home directory", async () => {
   const tmp = await Deno.makeTempDir();
   try {

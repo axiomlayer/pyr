@@ -23,6 +23,27 @@ export function pyrHome(): string {
 
 export const PYR_HOME = pyrHome();
 
+/** True when an already-normalized path is a filesystem root — somewhere a
+ *  project must never be scaffolded. Covers the POSIX root, a Windows drive
+ *  root (`c:`), and UNC roots: a bare server (`//server`) or a share with
+ *  nothing below it (`//server/share`). Extended-length prefixes are unwrapped
+ *  first, so `\\?\C:\` and `\\?\UNC\server\share` are recognized too. */
+function isRootPath(p: string): boolean {
+  if (p === "") return true; // "/" with its trailing slash stripped
+  if (/^[a-zA-Z]:$/.test(p)) return true;
+  if (!p.startsWith("//")) return false;
+
+  let segments = p.slice(2).split("/").filter((s) => s !== "");
+  if (segments[0] === "?" || segments[0] === ".") {
+    segments = segments.slice(1);
+    // `\\?\UNC\server\share` is a UNC path wearing a prefix; anything else
+    // behind `\\?\` is a local path, where the drive alone is the root.
+    if (segments[0]?.toLowerCase() === "unc") segments = segments.slice(1);
+    else return segments.length <= 1;
+  }
+  return segments.length <= 2;
+}
+
 /** Why `pyr init` (no name) must not scaffold into `cwd`: "home" if it is the
  *  user's home directory, "root" if it is a filesystem root, else null.
  *  Pure string comparison; callers pass already-resolved paths. Separators are
@@ -34,7 +55,7 @@ export function protectedInitDir(cwd: string, home?: string): "home" | "root" | 
     return s;
   };
   const c = norm(cwd);
-  if (c === "" || /^[a-zA-Z]:$/.test(c)) return "root";
+  if (isRootPath(c)) return "root";
   if (home !== undefined && norm(home) !== "" && c === norm(home)) return "home";
   return null;
 }
