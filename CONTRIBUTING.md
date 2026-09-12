@@ -70,6 +70,8 @@ deno run test
 deno compile --target aarch64-apple-darwin main.ts
 # Windows x86
 deno compile --target x86_64-pc-windows-msvc main.ts
+# Windows ARM64
+deno compile --target aarch64-pc-windows-msvc main.ts
 # Linux x86
 deno compile --target x86_64-unknown-linux-gnu main.ts
 # Linux ARM
@@ -117,6 +119,7 @@ set -eu
 echo "🔍 Running pre-push checks..."
 deno compile --target aarch64-apple-darwin main.ts
 deno compile --target x86_64-pc-windows-msvc main.ts
+deno compile --target aarch64-pc-windows-msvc main.ts
 deno compile --target x86_64-unknown-linux-gnu main.ts
 deno compile --target aarch64-unknown-linux-gnu main.ts
 deno compile --target x86_64-apple-darwin main.ts
