@@ -48,7 +48,7 @@ jobs:
       - name: test
         run: deno test -A
 
-  gate:
+  verify:
     if: always()
     needs: [changes, check]
     runs-on: ubuntu-latest
