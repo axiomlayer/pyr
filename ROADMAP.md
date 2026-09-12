@@ -11,10 +11,9 @@ the Python ecosystem’s needs.
 
 ### **2. Platform Support**
 
-- **Windows ARM64:** Track [Deno’s ARM64 support](https://deno.com/blog/v2.7) and add native Windows
-  ARM64 binaries once `deno compile` supports it.
-  - _Status:_ Blocked on Deno. Workaround: Document x86_64 emulation.
-  - Open to expiremental build with Bun.
+- **Windows ARM64:** Native Windows ARM64 binaries.
+  - _Status:_ Done. `deno compile` supports `aarch64-pc-windows-msvc`; CI builds
+    `pyr-windows-aarch64.zip` and smoke-tests it on a `windows-11-arm` runner.
 
 ---
 
@@ -34,4 +33,4 @@ the Python ecosystem’s needs.
 
 ---
 
-**Last Updated:** April 2026
+**Last Updated:** September 2026

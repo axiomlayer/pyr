@@ -94,6 +94,10 @@ jobs:
             target: x86_64-pc-windows-msvc
             artifact: pyr-windows-x86_64
             binary: pyr.exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            artifact: pyr-windows-aarch64
+            binary: pyr.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -123,7 +127,8 @@ jobs:
   # Pull the native-target binary produced by `build` and exercise it on its
   # own OS. macos-latest runners are arm64, so we use the darwin-aarch64
   # artifact there. On Windows we rename pyr.exe -> pyr so the existing
-  # `./pyr` invocations work uniformly across the OS matrix.
+  # `./pyr` invocations work uniformly across the OS matrix. windows-11-arm
+  # is a GitHub-hosted arm64 runner that is free for public repos only.
   smoke:
     needs: build
     if: github.ref_type != 'tag' && github.event_name != 'pull_request'
@@ -136,6 +141,8 @@ jobs:
             artifact: pyr-linux-x86_64
           - os: windows-latest
             artifact: pyr-windows-x86_64
+          - os: windows-11-arm
+            artifact: pyr-windows-aarch64
     runs-on: ${{ matrix.os }}
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
