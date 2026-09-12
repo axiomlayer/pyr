@@ -6,17 +6,59 @@ import denoConfig from "./deno.json" with { type: "json" };
 export const PYR_VERSION: string = denoConfig.version;
 export const PYR_REPO = "jasenc7/pyr";
 
+/** The user's home directory: $HOME, then $USERPROFILE (Windows). */
+export function userHome(): string | undefined {
+  return Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE");
+}
+
 /** Returns the pyr home dir. Honors PYR_HOME, falls back to $HOME/.pyr,
  *  then $USERPROFILE/.pyr (Windows). Throws if no home can be determined. */
 export function pyrHome(): string {
   const explicit = Deno.env.get("PYR_HOME");
   if (explicit) return explicit;
-  const home = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE");
+  const home = userHome();
   if (!home) throw new Error("cannot determine home directory");
   return `${home}/.pyr`;
 }
 
 export const PYR_HOME = pyrHome();
+
+/** True when an already-normalized path is a filesystem root — somewhere a
+ *  project must never be scaffolded. Covers the POSIX root, a Windows drive
+ *  root (`c:`), and UNC roots: a bare server (`//server`) or a share with
+ *  nothing below it (`//server/share`). Extended-length prefixes are unwrapped
+ *  first, so `\\?\C:\` and `\\?\UNC\server\share` are recognized too. */
+function isRootPath(p: string): boolean {
+  if (p === "") return true; // "/" with its trailing slash stripped
+  if (/^[a-zA-Z]:$/.test(p)) return true;
+  if (!p.startsWith("//")) return false;
+
+  let segments = p.slice(2).split("/").filter((s) => s !== "");
+  if (segments[0] === "?" || segments[0] === ".") {
+    segments = segments.slice(1);
+    // `\\?\UNC\server\share` is a UNC path wearing a prefix; anything else
+    // behind `\\?\` is a local path, where the drive alone is the root.
+    if (segments[0]?.toLowerCase() === "unc") segments = segments.slice(1);
+    else return segments.length <= 1;
+  }
+  return segments.length <= 2;
+}
+
+/** Why `pyr init` (no name) must not scaffold into `cwd`: "home" if it is the
+ *  user's home directory, "root" if it is a filesystem root, else null.
+ *  Pure string comparison; callers pass already-resolved paths. Separators are
+ *  normalized on every platform; case is folded only on Windows. */
+export function protectedInitDir(cwd: string, home?: string): "home" | "root" | null {
+  const norm = (p: string) => {
+    let s = p.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (isWindows()) s = s.toLowerCase();
+    return s;
+  };
+  const c = norm(cwd);
+  if (isRootPath(c)) return "root";
+  if (home !== undefined && norm(home) !== "" && c === norm(home)) return "home";
+  return null;
+}
 
 // --- platform ---
 
@@ -121,6 +163,33 @@ export async function init(name?: string) {
       // doesn't exist yet — fine, we'll create it
     }
   } else {
+    // `pyr init` with no name adopts cwd as the project. Running that in $HOME
+    // (or a drive root) silently turns the whole tree into a project named
+    // after the user, so refuse before touching anything. Resolve symlinks and
+    // canonical case first; fall back to the raw strings if either can't be.
+    const real = (p: string) => {
+      try {
+        return Deno.realPathSync(p);
+      } catch {
+        return p;
+      }
+    };
+    // HOME and USERPROFILE can point at different directories in the same
+    // process (e.g. Git Bash sets HOME while Windows still populates
+    // USERPROFILE) — userHome()'s `??` only ever checks the first one set, so
+    // an init run from whichever it didn't pick would slip the guard. Check
+    // cwd against both.
+    const cwdReal = real(Deno.cwd());
+    let why: "home" | "root" | null = null;
+    for (const h of [Deno.env.get("HOME"), Deno.env.get("USERPROFILE")]) {
+      why = protectedInitDir(cwdReal, h === undefined ? undefined : real(h));
+      if (why) break;
+    }
+    if (why) {
+      console.error(`refusing to init in your ${why} directory`);
+      console.error("run `pyr init <name>` to create a new project in a subdirectory");
+      Deno.exit(1);
+    }
     for (const sentinel of ["pyproject.toml", "requirements.txt", "app/main.py"]) {
       try {
         await Deno.stat(sentinel);

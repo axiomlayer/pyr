@@ -27,7 +27,8 @@ const COMMANDS: Command[] = [
     summary: "create a new project",
     usage: "pyr init [name]\n\n" +
       "creates ./<name>/ (or cwd if omitted) with app/, pyproject.toml,\n" +
-      "requirements.txt, .gitignore, and a fresh .venv.",
+      "requirements.txt, .gitignore, and a fresh .venv.\n" +
+      "refuses to adopt your home directory or a filesystem root as cwd.",
     handler: (args) => init(args[0]),
   },
   {

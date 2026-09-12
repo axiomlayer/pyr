@@ -1,4 +1,5 @@
 import { assertEquals, assertMatch } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { fromFileUrl } from "https://deno.land/std@0.224.0/path/mod.ts";
 import {
   addPyprojectDep,
   basename,
@@ -9,6 +10,7 @@ import {
   managedPython,
   parseRequirementName,
   platformTriple,
+  protectedInitDir,
   pyproject,
   pyrHome,
   readLock,
@@ -424,18 +426,24 @@ Deno.test("writeLock with empty input writes header only", async () => {
 /** Run `deno run -A main.ts <args>` from `cwd`, capturing stdout/stderr/code.
  *  Used to test guards that call Deno.exit, which would terminate the test
  *  runner if invoked in-process. */
-async function runPyr(cwd: string, args: string[]): Promise<{
+async function runPyr(
+  cwd: string,
+  args: string[],
+  env?: Record<string, string>,
+): Promise<{
   code: number;
   stdout: string;
   stderr: string;
 }> {
-  const repoRoot = new URL("./main.ts", import.meta.url).pathname.replace(
-    /\/main\.ts$/,
-    "",
-  );
+  // fromFileUrl, not URL.pathname: on Windows the latter yields "/C:/..." which
+  // Deno can load but won't discover deno.json from. Pass --config explicitly
+  // so resolution never depends on the subprocess cwd (always a temp dir).
+  const mainTs = fromFileUrl(new URL("./main.ts", import.meta.url));
+  const config = fromFileUrl(new URL("./deno.json", import.meta.url));
   const cmd = new Deno.Command(Deno.execPath(), {
-    args: ["run", "-A", `${repoRoot}/main.ts`, ...args],
+    args: ["run", "-A", "--config", config, mainTs, ...args],
     cwd,
+    env,
     stdout: "piped",
     stderr: "piped",
   });
@@ -471,6 +479,92 @@ Deno.test("init refuses to overwrite sentinel files in cwd", async () => {
     await Deno.remove(tmp, { recursive: true });
   }
 });
+
+Deno.test("protectedInitDir flags home and roots, not ordinary dirs", () => {
+  assertEquals(protectedInitDir("/home/jasen", "/home/jasen"), "home");
+  assertEquals(protectedInitDir("/home/jasen/", "/home/jasen"), "home");
+  assertEquals(protectedInitDir("/home/jasen/dev/proj", "/home/jasen"), null);
+  assertEquals(protectedInitDir("/home/jasen", undefined), null);
+  assertEquals(protectedInitDir("/", "/home/jasen"), "root");
+  assertEquals(protectedInitDir("C:\\", "C:\\Users\\jasen"), "root");
+  assertEquals(protectedInitDir("C:\\Users\\jasen", "C:/Users/jasen/"), "home");
+  assertEquals(protectedInitDir("C:\\Users\\jasen\\dev", "C:\\Users\\jasen"), null);
+  if (isWindows()) {
+    assertEquals(protectedInitDir("c:\\users\\JASEN", "C:\\Users\\jasen"), "home");
+  }
+});
+
+Deno.test("protectedInitDir flags UNC and extended-length roots", () => {
+  // A share root is as unsafe to scaffold into as a drive root.
+  assertEquals(protectedInitDir("\\\\server\\share", "C:\\Users\\jasen"), "root");
+  assertEquals(protectedInitDir("\\\\server\\share\\", "C:\\Users\\jasen"), "root");
+  assertEquals(protectedInitDir("//server/share", "/home/jasen"), "root");
+  assertEquals(protectedInitDir("\\\\server", "C:\\Users\\jasen"), "root");
+  // Anything below the share is an ordinary directory.
+  assertEquals(protectedInitDir("\\\\server\\share\\proj", "C:\\Users\\jasen"), null);
+  assertEquals(protectedInitDir("//server/share/team/proj", "/home/jasen"), null);
+  // A home directory on a share is still home, not root.
+  assertEquals(
+    protectedInitDir("\\\\server\\share\\jasen", "\\\\server\\share\\jasen"),
+    "home",
+  );
+  // Extended-length prefixes unwrap to the same answers.
+  assertEquals(protectedInitDir("\\\\?\\C:\\", "C:\\Users\\jasen"), "root");
+  assertEquals(protectedInitDir("\\\\?\\C:\\Users\\jasen\\dev", "C:\\Users\\jasen"), null);
+  assertEquals(protectedInitDir("\\\\?\\UNC\\server\\share", "C:\\Users\\jasen"), "root");
+  assertEquals(protectedInitDir("\\\\?\\UNC\\server\\share\\proj", "C:\\Users\\jasen"), null);
+});
+
+Deno.test("init with no name refuses the home directory", async () => {
+  const tmp = await Deno.makeTempDir();
+  try {
+    // Point both home variables at the temp dir and run from inside it.
+    const result = await runPyr(tmp, ["init"], { HOME: tmp, USERPROFILE: tmp });
+    assertEquals(result.code, 1);
+    assertMatch(result.stderr, /refusing to init in your home directory/);
+    assertMatch(result.stderr, /pyr init <name>/);
+    assertEquals(await exists(`${tmp}/pyproject.toml`), false);
+  } finally {
+    await Deno.remove(tmp, { recursive: true });
+  }
+});
+
+Deno.test("init with no name refuses USERPROFILE even when HOME differs", async () => {
+  // Regression for the case userHome()'s `??` misses: HOME and USERPROFILE
+  // set to different directories. Running from the one HOME doesn't point at
+  // must still be refused.
+  const home = await Deno.makeTempDir();
+  const profile = await Deno.makeTempDir();
+  try {
+    const result = await runPyr(profile, ["init"], { HOME: home, USERPROFILE: profile });
+    assertEquals(result.code, 1);
+    assertMatch(result.stderr, /refusing to init in your home directory/);
+    assertEquals(await exists(`${profile}/pyproject.toml`), false);
+  } finally {
+    await Deno.remove(home, { recursive: true });
+    await Deno.remove(profile, { recursive: true });
+  }
+});
+
+Deno.test("init with no name refuses a filesystem root", async () => {
+  // Derive the drive from cwd instead of assuming C: exists. Windows can boot
+  // from another letter, and a cwd that does not exist stops the subprocess
+  // from starting at all, failing the suite before the guard is exercised.
+  const drive = Deno.cwd().match(/^[a-zA-Z]:/)?.[0];
+  const root = isWindows() ? `${drive ?? "C:"}\\` : "/";
+  const result = await runPyr(root, ["init"]);
+  assertEquals(result.code, 1);
+  assertMatch(result.stderr, /refusing to init in your root directory/);
+});
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 Deno.test("run errors when app/main.py is missing", async () => {
   const tmp = await Deno.makeTempDir();
