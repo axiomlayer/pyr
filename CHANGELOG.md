@@ -1,3 +1,15 @@
+## Unreleased
+
+- `pyr upgrade --python X.Y.Z[+BUILD]` installs only the requested CPython version/build and fails
+  closed when it is unavailable, while retaining checksum verification, locking, and rollback
+- Managed Python upgrades track the exact upstream build, so same-version rebuilds are not skipped
+- Release builds no longer resolve JSR packages; the executable graph is local source plus built-ins
+- Native Windows uses `%USERPROFILE%` ahead of Git Bash's `$HOME`; WSL and Windows installs stay
+  separate, and the POSIX installer rejects MSYS shells with PowerShell guidance
+- The POSIX installer restricts curl to HTTPS with TLS 1.2 or newer
+- CI adds native Windows tests, Git Bash bootstrap coverage, and a Windows PowerShell 5.1 installer
+  check
+
 ## v0.1.1 (2026-09-14)
 
 - Windows ARM64 (aarch64) build, so `install.ps1` works on ARM64 hosts; v0.1.0 shipped no such asset

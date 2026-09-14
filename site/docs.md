@@ -13,6 +13,7 @@ pyr remove httpx      # the obvious
 pyr sync              # reconcile venv + lock with pyproject.toml
 pyr upgrade           # update pyr itself
 pyr upgrade --python  # update the managed cpython
+pyr upgrade --python 3.14.7+20260901  # install one exact upstream build
 ```
 
 ## Install
@@ -25,6 +26,10 @@ curl -fsSL https://pyrun.dev/install.sh | sh
 
 The script drops `pyr` into `~/.pyr/bin/`. Add that to your `PATH` — the
 installer prints the exact line for your shell.
+
+WSL counts as Linux: install inside WSL and leave `PYR_HOME` at its WSL path.
+Do not share that runtime or a project `.venv` with native Windows Pyr; the
+executables and venv layouts are platform-specific.
 
 ### Windows
 
@@ -40,6 +45,11 @@ On Windows ARM64, it uses the native ARM64 ZIP when the latest release has one;
 older releases without that asset fall back to the x86_64 ZIP under Windows
 emulation and print a warning.
 
+Git Bash counts as native Windows. Use `install.ps1` from PowerShell rather
+than piping `install.sh` to Bash, then restart Git Bash to pick up the Windows
+user `PATH`. Native Pyr prefers `%USERPROFILE%` over Git Bash's `$HOME`; use an
+explicit Windows-native `PYR_HOME` to override it.
+
 Or, manually: download the latest `pyr-windows-x86_64.zip` (or
 `pyr-windows-aarch64.zip` on ARM64) from
 [releases](https://github.com/jasenc7/pyr/releases/latest), unzip it, and put
@@ -47,6 +57,10 @@ Or, manually: download the latest `pyr-windows-x86_64.zip` (or
 
 `PYR_HOME` overrides where pyr keeps its state and binary; defaults to `~/.pyr`
 (or `%USERPROFILE%\.pyr` on Windows).
+
+The released executable does not depend on Deno, fnm, Node, npm, or JSR. Its
+compile graph is local source plus Deno/Node built-ins; the separate website
+toolchain is not part of the release artifact.
 
 ## How dependencies work
 
@@ -82,7 +96,7 @@ prunes anything no longer needed, and rewrites the lock. `pyr run` auto-syncs if
 | `pyr remove <pkg>...`  | Remove packages from `pyproject.toml`, then sync.                                  |
 | `pyr sync`             | Reconcile the venv and lock with `pyproject.toml`. Idempotent.                     |
 | `pyr upgrade`          | Update the pyr binary from the latest GitHub release.                              |
-| `pyr upgrade --python` | Update the managed CPython in `~/.pyr/python`.                                     |
+| `pyr upgrade --python [VERSION]` | Update managed CPython, optionally pinning `X.Y.Z[+BUILD]`.            |
 | `pyr help [cmd]`       | Top-level usage, or per-command details.                                           |
 
 `pyr <cmd> --help` and `pyr help <cmd>` are equivalent. To pass a literal
@@ -108,11 +122,20 @@ myapp/
 ## How upgrades propagate
 
 `pyr upgrade --python` checks release metadata once. If the installed CPython
-version already matches and runs successfully, no archive is downloaded. Otherwise
-pyr downloads and extracts into a temporary directory beside the live runtime,
-checks the interpreter's version and venv tooling, and then replaces `~/.pyr/python`.
-Download, extraction, and verification failures leave the existing tree in place;
-if moving the replacement fails, pyr restores the previous tree.
+version and exact upstream build both match and run successfully, no archive is
+downloaded. Otherwise pyr downloads and extracts into a temporary directory beside
+the live runtime, checks the interpreter's version and venv tooling, and then
+replaces `~/.pyr/python`. Older installs without an exact-build stamp refresh once
+on their next explicit Python upgrade. Download, extraction, and verification
+failures leave the existing tree in place; if moving the replacement fails, pyr
+restores the previous tree.
+
+`pyr upgrade --python X.Y.Z` accepts only that interpreter version from the
+current upstream release and fails rather than selecting another version. A
+build-qualified pin such as `3.14.7+20260901` resolves that exact
+python-build-standalone release and asset, making it the preferred form for a
+reproducible runtime manifest. The selected release's `SHA256SUMS` entry is
+required and verified before extraction.
 
 Only one Python installer may run per `PYR_HOME` at a time. An interrupted process
 can leave `.python-install-lock` and a `.python-install-*` directory there. Confirm

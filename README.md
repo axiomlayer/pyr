@@ -22,6 +22,10 @@ curl -fsSL https://pyrun.dev/install.sh | sh
 
 The script installs `pyr` to `~/.pyr/bin/`. Add this to your `PATH`.
 
+WSL is a Linux environment: run this installer inside WSL and keep its Linux `~/.pyr` separate from
+native Windows Pyr. A WSL install uses Linux binaries and `bin/` venv layouts; it cannot safely
+share `%USERPROFILE%\.pyr` or project venvs with the Windows executable.
+
 ### Windows
 
 ```powershell
@@ -32,10 +36,18 @@ Installs `pyr.exe` to `%USERPROFILE%\.pyr\bin\`. Add this to your `PATH`. On Win
 installer selects the native ARM64 ZIP when the latest release has one; older releases without that
 asset use the x86_64 ZIP under Windows emulation and print a warning.
 
+Git Bash is still native Windows. Run the PowerShell installer (not `install.sh`), then restart Git
+Bash so it inherits the updated user `PATH`. Native Pyr prefers `%USERPROFILE%` over Git Bash's
+POSIX-looking `$HOME`; set `PYR_HOME` explicitly when a different Windows-native location is wanted.
+
 Every release publishes a `SHA256SUMS` file next to the zips. The installers resolve one release
 tag, verify the selected ZIP against that manifest, and only then install it; `pyr upgrade` and the
 managed CPython bootstrap apply the same fail-closed check. The v0.1.0 manifest was backfilled for
 compatibility with the first release.
+
+The shipped executable is standalone: it neither uses nor modifies an existing Deno, fnm, Node, or
+npm installation. Its release compilation graph uses only local source and Deno/Node built-ins—no
+JSR packages. The website has a separate build toolchain and is not embedded in release artifacts.
 
 ---
 
@@ -50,6 +62,7 @@ pyr remove httpx      # Remove a dependency
 pyr sync              # Reconcile venv + lock with pyproject.toml
 pyr upgrade           # Update pyr itself
 pyr upgrade --python  # Update the managed CPython
+pyr upgrade --python 3.14.7+20260901  # Install one exact upstream CPython build
 ```
 
 ---
@@ -94,10 +107,17 @@ myapp/
 - **Self-Upgrades:** Replaces the running binary with the latest release.
 
 Python bootstrap and upgrade use the same installer. `pyr upgrade --python` checks release metadata
-once and skips the download when the installed CPython version already matches and passes a runtime
-check. Otherwise it obtains the upstream checksum manifest, verifies the archive before extracting,
-then checks the replacement before moving the existing runtime. A failed replacement move restores
-the previous installation.
+once and skips the download only when the installed CPython version and exact upstream build both
+match and pass a runtime check. Otherwise it obtains the upstream checksum manifest, verifies the
+archive before extracting, then checks the replacement before moving the existing runtime. Older
+installs without an exact-build stamp refresh once on their next explicit Python upgrade. A failed
+replacement move restores the previous installation.
+
+`pyr upgrade --python X.Y.Z` selects only that CPython version from the current upstream release and
+fails if it is absent—there is no fallback to the release's newest Python. For a durable runtime
+manifest, use `X.Y.Z+BUILD` (for example `3.14.7+20260901`): pyr resolves that exact
+python-build-standalone release and asset, verifies its release checksum, and records the full build
+identifier. Both forms use the same lock, staging, interpreter probe, and rollback path.
 
 For a deep dive, see:
 

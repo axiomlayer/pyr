@@ -11,11 +11,18 @@ Deno.test("Python installation preserves the live runtime until replacement is v
   const root = await Deno.makeTempDir();
   const runtimeHome = `${root.replaceAll("\\", "/")}/pyr home`;
   Deno.env.set("PYR_HOME", runtimeHome);
-  const { ensurePython, upgrade, managedPython, platformTriple, isWindows, sha256Hex } =
-    await import(
-      `./lib.ts?python-install-test=${crypto.randomUUID()}`
-    );
+  const {
+    ensurePython,
+    upgrade,
+    managedPython,
+    managedPythonBuild,
+    platformTriple,
+    isWindows,
+    sha256Hex,
+  } = await import(`./lib.ts?python-install-test=${crypto.randomUUID()}`);
   const version = "3.14.1";
+  const build = `${version}+20260914`;
+  const previousBuild = `${version}+20260825`;
   const binaryRelative = isWindows() ? "python.exe" : "bin/python3";
   const archiveRoot = `${root}/archive`;
   const fixtureBin = `${archiveRoot}/python/${binaryRelative}`;
@@ -35,11 +42,20 @@ Deno.test("Python installation preserves the live runtime until replacement is v
   const archiveDigest = await sha256Hex(archiveBytes);
   const releaseUrl =
     "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest";
+  const pinnedReleaseUrl =
+    "https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20260914";
   const assetUrl = "https://example.invalid/python.tar.gz";
+  const previousAssetUrl = "https://example.invalid/python-previous.tar.gz";
   const checksumUrl = "https://example.invalid/SHA256SUMS";
-  const assetName = `cpython-${version}+20260914-${platformTriple()}-install_only.tar.gz`;
+  const assetName = `cpython-${build}-${platformTriple()}-install_only.tar.gz`;
+  const previousAssetName = `cpython-${previousBuild}-${platformTriple()}-install_only.tar.gz`;
   const release = {
+    tag_name: "20260914",
     assets: [{
+      // Deliberately first: selection must not depend on GitHub's asset order.
+      name: previousAssetName,
+      browser_download_url: previousAssetUrl,
+    }, {
       name: assetName,
       browser_download_url: assetUrl,
     }, {
@@ -49,6 +65,7 @@ Deno.test("Python installation preserves the live runtime until replacement is v
   };
   let calls: string[] = [];
   let releaseResponse: () => Response = () => Response.json(release);
+  let pinnedReleaseResponse: () => Response = () => Response.json(release);
   let checksumResponse: () => Response = () => new Response(`${archiveDigest}  ${assetName}\n`);
   let downloadResponse: () => Response = () => new Response(archiveBytes);
   let reportedVersion: string | undefined;
@@ -59,6 +76,7 @@ Deno.test("Python installation preserves the live runtime until replacement is v
     const url = String(input);
     calls.push(`${init?.method ?? "GET"} ${url}`);
     if (url === releaseUrl) return Promise.resolve(releaseResponse());
+    if (url === pinnedReleaseUrl) return Promise.resolve(pinnedReleaseResponse());
     if (url === checksumUrl) return Promise.resolve(checksumResponse());
     if (url === assetUrl) return Promise.resolve(downloadResponse());
     throw new Error(`unexpected network request: ${url}`);
@@ -97,16 +115,23 @@ Deno.test("Python installation preserves the live runtime until replacement is v
     await originalRename(from, to);
   };
 
-  async function reset(current: string | null = "3.13.7") {
+  async function reset(
+    current: string | null = "3.13.7",
+    currentBuild: string | null = current ? `${current}+20260825` : null,
+  ) {
     await Deno.remove(runtimeHome, { recursive: true }).catch(() => {});
     if (current) {
       await Deno.mkdir(`${runtimeHome}/python/bin`, { recursive: true });
       await Deno.writeTextFile(managedPython(), current);
       await Deno.writeTextFile(`${runtimeHome}/python/.version`, current);
+      if (currentBuild) {
+        await Deno.writeTextFile(`${runtimeHome}/python/.build`, currentBuild);
+      }
       await Deno.writeTextFile(`${runtimeHome}/python/keep.txt`, "original runtime");
     }
     calls = [];
     releaseResponse = () => Response.json(release);
+    pinnedReleaseResponse = () => Response.json(release);
     checksumResponse = () => new Response(`${archiveDigest}  ${assetName}\n`);
     downloadResponse = () => new Response(archiveBytes);
     reportedVersion = undefined;
@@ -114,25 +139,128 @@ Deno.test("Python installation preserves the live runtime until replacement is v
     failRollback = false;
   }
 
-  async function assertPreserved(current = "3.13.7") {
+  async function assertPreserved(
+    current = "3.13.7",
+    currentBuild: string | null = `${current}+20260825`,
+  ) {
     assertEquals(await Deno.readTextFile(managedPython()), current);
     assertEquals(await Deno.readTextFile(`${runtimeHome}/python/.version`), current);
+    assertEquals(await managedPythonBuild(), currentBuild);
     assertEquals(await Deno.readTextFile(`${runtimeHome}/python/keep.txt`), "original runtime");
     assertEquals(Array.from(Deno.readDirSync(runtimeHome), (e) => e.name), ["python"]);
   }
 
   try {
-    await t.step("cached bootstrap is offline", async () => {
+    await t.step("cached bootstrap is offline with new or legacy stamps", async () => {
+      for (const currentBuild of ["3.13.7+20260825", null]) {
+        await reset("3.13.7", currentBuild);
+        assertEquals(await ensurePython(), managedPython());
+        assertEquals(calls, []);
+        await assertPreserved("3.13.7", currentBuild);
+      }
+    });
+    await t.step("same CPython build uses one GET and no download", async () => {
+      await reset(version, build);
+      await upgrade(["--python"]);
+      assertEquals(calls, [`GET ${releaseUrl}`]);
+      await assertPreserved(version, build);
+    });
+    await t.step("newer same-version rebuild is selected and installed", async () => {
+      await reset(version, previousBuild);
+      await upgrade(["--python"]);
+      assertEquals(calls, [`GET ${releaseUrl}`, `GET ${checksumUrl}`, `GET ${assetUrl}`]);
+      assertEquals(await Deno.readTextFile(managedPython()), version);
+      assertEquals(await Deno.readTextFile(`${runtimeHome}/python/.version`), version);
+      assertEquals(await managedPythonBuild(), build);
+      assertEquals(Array.from(Deno.readDirSync(runtimeHome), (e) => e.name), ["python"]);
+    });
+    await t.step("semantic pin selects only the requested CPython version", async () => {
+      await reset("3.13.7");
+      const otherAsset = {
+        name: `cpython-3.15.0+20260914-${platformTriple()}-install_only.tar.gz`,
+        browser_download_url: "https://example.invalid/python-3.15.tar.gz",
+      };
+      releaseResponse = () =>
+        Response.json({
+          ...release,
+          assets: [otherAsset, ...release.assets],
+        });
+      await upgrade(["--python", version]);
+      assertEquals(calls, [`GET ${releaseUrl}`, `GET ${checksumUrl}`, `GET ${assetUrl}`]);
+      assertEquals(await Deno.readTextFile(`${runtimeHome}/python/.version`), version);
+      assertEquals(await managedPythonBuild(), build);
+    });
+    await t.step("build-qualified pin resolves that immutable upstream release", async () => {
+      await reset("3.13.7");
+      await upgrade(["--python", build]);
+      assertEquals(calls, [
+        `GET ${pinnedReleaseUrl}`,
+        `GET ${checksumUrl}`,
+        `GET ${assetUrl}`,
+      ]);
+      assertEquals(await Deno.readTextFile(`${runtimeHome}/python/.version`), version);
+      assertEquals(await managedPythonBuild(), build);
+    });
+    await t.step("missing semantic pin never falls back to another version", async () => {
       await reset();
-      assertEquals(await ensurePython(), managedPython());
+      releaseResponse = () =>
+        Response.json({
+          tag_name: "20260914",
+          assets: [{
+            name: `cpython-3.15.0+20260914-${platformTriple()}-install_only.tar.gz`,
+            browser_download_url: "https://example.invalid/python-3.15.tar.gz",
+          }, release.assets[2]],
+        });
+      await assertRejects(
+        () => upgrade(["--python", version]),
+        Error,
+        `requested python ${version}`,
+      );
+      assertEquals(calls, [`GET ${releaseUrl}`]);
+      await assertPreserved();
+    });
+    await t.step("missing exact build never falls back within its release", async () => {
+      await reset();
+      pinnedReleaseResponse = () =>
+        Response.json({
+          tag_name: "20260914",
+          assets: [release.assets[0], release.assets[2]],
+        });
+      await assertRejects(
+        () => upgrade(["--python", build]),
+        Error,
+        `requested python ${build}`,
+      );
+      assertEquals(calls, [`GET ${pinnedReleaseUrl}`]);
+      await assertPreserved();
+    });
+    await t.step("missing pinned release never falls back to latest", async () => {
+      await reset();
+      pinnedReleaseResponse = () => new Response("not found", { status: 404 });
+      await assertRejects(
+        () => upgrade(["--python", build]),
+        Error,
+        `requested python build ${build} is unavailable`,
+      );
+      assertEquals(calls, [`GET ${pinnedReleaseUrl}`]);
+      await assertPreserved();
+    });
+    await t.step("invalid pin is rejected before locking or network", async () => {
+      await reset();
+      await assertRejects(
+        () => upgrade(["--python", "3.14"]),
+        Error,
+        "expected X.Y.Z or X.Y.Z+BUILD",
+      );
       assertEquals(calls, []);
       await assertPreserved();
     });
-    await t.step("same CPython version uses one GET and no download", async () => {
-      await reset(version);
+    await t.step("legacy version-only stamp refreshes to an exact build", async () => {
+      await reset(version, null);
       await upgrade(["--python"]);
-      assertEquals(calls, [`GET ${releaseUrl}`]);
-      await assertPreserved(version);
+      assertEquals(calls, [`GET ${releaseUrl}`, `GET ${checksumUrl}`, `GET ${assetUrl}`]);
+      assertEquals(await Deno.readTextFile(`${runtimeHome}/python/.version`), version);
+      assertEquals(await managedPythonBuild(), build);
     });
     await t.step("metadata rate limit leaves the current runtime intact", async () => {
       await reset();
@@ -156,7 +284,7 @@ Deno.test("Python installation preserves the live runtime until replacement is v
     });
     await t.step("missing checksum manifest leaves Python untouched", async () => {
       await reset();
-      releaseResponse = () => Response.json({ assets: [release.assets[0]] });
+      releaseResponse = () => Response.json({ assets: [release.assets[1]] });
       await assertRejects(() => upgrade(["--python"]), Error, "no SHA256SUMS");
       await assertPreserved();
     });
@@ -166,12 +294,17 @@ Deno.test("Python installation preserves the live runtime until replacement is v
       await assertRejects(() => upgrade(["--python"]), Error, "download failed");
       await assertPreserved();
     });
-    await t.step("tampered archive is rejected before extraction", async () => {
+    await t.step("tampered archive for an exact pin is rejected before extraction", async () => {
       await reset();
       const tampered = archiveBytes.slice();
       tampered[0] ^= 0xff;
       downloadResponse = () => new Response(tampered);
-      await assertRejects(() => upgrade(["--python"]), Error, "SHA-256 mismatch");
+      await assertRejects(() => upgrade(["--python", build]), Error, "SHA-256 mismatch");
+      assertEquals(calls, [
+        `GET ${pinnedReleaseUrl}`,
+        `GET ${checksumUrl}`,
+        `GET ${assetUrl}`,
+      ]);
       await assertPreserved();
     });
     await t.step("interrupted download removes staging and keeps the current runtime", async () => {
@@ -203,7 +336,10 @@ Deno.test("Python installation preserves the live runtime until replacement is v
     await t.step("failed promotion restores the previous runtime", async () => {
       await reset();
       failPromotion = true;
-      await assertRejects(() => upgrade(["--python"]), Deno.errors.PermissionDenied);
+      await assertRejects(
+        () => upgrade(["--python", build]),
+        Deno.errors.PermissionDenied,
+      );
       await assertPreserved();
     });
     await t.step("failed rollback preserves the recovery tree", async () => {
@@ -216,6 +352,7 @@ Deno.test("Python installation preserves the live runtime until replacement is v
       const previous = `${runtimeHome}/${entries[0].name}/previous`;
       assertEquals(await Deno.readTextFile(`${previous}/keep.txt`), "original runtime");
       assertEquals(await Deno.readTextFile(`${previous}/${binaryRelative}`), "3.13.7");
+      assertEquals(await Deno.readTextFile(`${previous}/.build`), "3.13.7+20260825");
     });
     await t.step(
       "successful upgrade promotes the verified runtime and clears staging",
@@ -224,6 +361,7 @@ Deno.test("Python installation preserves the live runtime until replacement is v
         await upgrade(["--python"]);
         assertEquals(await Deno.readTextFile(managedPython()), version);
         assertEquals(await Deno.readTextFile(`${runtimeHome}/python/.version`), version);
+        assertEquals(await managedPythonBuild(), build);
         assertEquals(Array.from(Deno.readDirSync(runtimeHome), (e) => e.name), ["python"]);
         assertEquals(calls, [`GET ${releaseUrl}`, `GET ${checksumUrl}`, `GET ${assetUrl}`]);
       },
@@ -238,6 +376,7 @@ Deno.test("Python installation preserves the live runtime until replacement is v
         assertEquals(await ensurePython(), managedPython());
         assertEquals(await Deno.readTextFile(managedPython()), version);
         assertEquals(await Deno.readTextFile(`${runtimeHome}/python/.version`), version);
+        assertEquals(await managedPythonBuild(), build);
         assertEquals(calls, [`GET ${releaseUrl}`, `GET ${checksumUrl}`, `GET ${assetUrl}`]);
       }
     });
@@ -246,7 +385,11 @@ Deno.test("Python installation preserves the live runtime until replacement is v
       async () => {
         await reset();
         await Deno.mkdir(`${runtimeHome}/.python-install-lock`);
-        await assertRejects(() => upgrade(["--python"]), Error, "python installation is locked");
+        await assertRejects(
+          () => upgrade(["--python", build]),
+          Error,
+          "python installation is locked",
+        );
         assertEquals(calls, []);
         await Deno.remove(`${runtimeHome}/.python-install-lock`);
         await assertPreserved();

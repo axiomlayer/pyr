@@ -1,4 +1,4 @@
-import { parseArgs } from "@std/cli/parse-args";
+import { parseArgs } from "node:util";
 import {
   add,
   cleanupSelfUpgradeOld,
@@ -67,9 +67,11 @@ const COMMANDS: Command[] = [
   {
     name: "upgrade",
     summary: "update pyr (--python to update runtime)",
-    usage: "pyr upgrade [--python]\n\n" +
+    usage: "pyr upgrade [--python [VERSION]]\n\n" +
       "  (no flags)   update the pyr binary to the latest release\n" +
-      "  --python     update the managed cpython in ~/.pyr/python",
+      "  --python     update managed cpython to the latest release\n" +
+      "  --python X.Y.Z[+BUILD]\n" +
+      "               install exactly that cpython version or upstream build",
     handler: (args) => upgrade(args),
   },
 ];
@@ -103,15 +105,43 @@ function find(name: string): Command | undefined {
 // self-upgrade. No-op on other platforms and when nothing is stale.
 await cleanupSelfUpgradeOld();
 
-// Top-level parse. `stopEarly` halts flag parsing at the first positional —
-// keeping subcommand args raw so handlers (and pip downstream) see them
-// verbatim. The `--` separator is supported by every command via the same
-// convention: anything after `--` is passed through unchanged.
-const parsed = parseArgs(Deno.args, {
-  boolean: ["help", "version"],
-  alias: { h: "help", v: "version" },
-  stopEarly: true,
+// Top-level parse. Split at the first positional before using the Node-compatible
+// parser so subcommand args (and pip downstream) stay raw. `node:util` is built
+// into Deno and keeps the release graph independent of package registries.
+let split = Deno.args.length;
+let hasSeparator = false;
+for (let i = 0; i < Deno.args.length; i++) {
+  const arg = Deno.args[i];
+  if (arg === "--") {
+    split = i;
+    hasSeparator = true;
+    break;
+  }
+  if (arg === "-" || !arg.startsWith("-")) {
+    split = i;
+    break;
+  }
+}
+const parsedOptions = parseArgs({
+  args: Deno.args.slice(0, split),
+  options: {
+    help: { type: "boolean", short: "h" },
+    version: { type: "boolean", short: "v" },
+  },
+  strict: false,
 });
+const unknownOption = Object.keys(parsedOptions.values).find((name) =>
+  name !== "help" && name !== "version"
+);
+if (unknownOption) {
+  console.error(`unknown option: --${unknownOption}`);
+  Deno.exit(1);
+}
+const parsed = {
+  help: parsedOptions.values.help === true,
+  version: parsedOptions.values.version === true,
+  _: Deno.args.slice(split + (hasSeparator ? 1 : 0)),
+};
 
 // `pyr --help` / `pyr -h` (with no subcommand) — top-level help.
 if (parsed.help && parsed._.length === 0) {

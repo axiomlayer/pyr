@@ -1,14 +1,15 @@
-import { ProgressBarStream } from "@std/cli/unstable-progress-bar-stream";
-import { Spinner } from "@std/cli/unstable-spinner";
-import { parse as parseToml } from "@std/toml";
 import denoConfig from "./deno.json" with { type: "json" };
 
 export const PYR_VERSION: string = denoConfig.version;
 export const PYR_REPO = "jasenc7/pyr";
 
-/** The user's home directory: $HOME, then $USERPROFILE (Windows). */
+/** The user's home directory. Native Windows prefers USERPROFILE so an MSYS
+ *  HOME such as /c/Users/name cannot redirect a Windows binary into a
+ *  misinterpreted path. Unix (including WSL) continues to prefer HOME. */
 export function userHome(): string | undefined {
-  return Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE");
+  const home = Deno.env.get("HOME");
+  const profile = Deno.env.get("USERPROFILE");
+  return isWindows() ? profile ?? home : home ?? profile;
 }
 
 /** Returns the pyr home dir. Honors PYR_HOME, falls back to $HOME/.pyr,
@@ -98,9 +99,17 @@ export function venvPaths(root: string = ".venv"): VenvPaths {
 
 // --- ui ---
 //
-// Thin shims around @std/cli's Spinner and ProgressBarStream — both still live
-// under unstable-* import paths. Containing the unstable surface to one place
-// makes it easy to swap when these stabilize.
+// Keep terminal feedback local so the release build has no registry imports.
+
+const stderrEncoder = new TextEncoder();
+
+function writeStderr(text: string): void {
+  try {
+    Deno.stderr.writeSync(stderrEncoder.encode(text));
+  } catch {
+    // Terminal feedback is best-effort and must never break an install.
+  }
+}
 
 /** True iff stderr is connected to an interactive terminal. When false (CI,
  *  redirected output, test capture, etc.), animated UI elements would just
@@ -121,9 +130,20 @@ export function makeSpinner(message: string): { stop: () => void } {
     console.error(message);
     return { stop: () => {} };
   }
-  const s = new Spinner({ message });
-  s.start();
-  return { stop: () => s.stop() };
+  const frames = ["-", "\\", "|", "/"];
+  let frame = 0;
+  const render = () => writeStderr(`\r${frames[frame++ % frames.length]} ${message}`);
+  render();
+  const timer = setInterval(render, 80);
+  let stopped = false;
+  return {
+    stop: () => {
+      if (stopped) return;
+      stopped = true;
+      clearInterval(timer);
+      writeStderr("\r\x1b[2K");
+    },
+  };
 }
 
 /** Wrap a fetch response body in a progress-tracking TransformStream when
@@ -135,7 +155,24 @@ export function maybeProgressStream(resp: Response): ReadableStream<Uint8Array> 
   const lenHeader = resp.headers.get("content-length");
   const max = lenHeader ? Number(lenHeader) : NaN;
   if (!Number.isFinite(max) || max <= 0) return resp.body;
-  return resp.body.pipeThrough(new ProgressBarStream({ max }));
+  let transferred = 0;
+  let lastPercent = -1;
+  return resp.body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        transferred += chunk.byteLength;
+        const percent = Math.min(100, Math.floor((transferred / max) * 100));
+        if (percent !== lastPercent) {
+          lastPercent = percent;
+          writeStderr(`\rdownloading... ${percent}%`);
+        }
+        controller.enqueue(chunk);
+      },
+      flush() {
+        writeStderr("\r\x1b[2K");
+      },
+    }),
+  );
 }
 
 // --- commands ---
@@ -496,12 +533,49 @@ async function pyprojectNewerThanLock(): Promise<boolean> {
   }
 }
 
-export async function upgrade(args: string[]) {
-  if (args.includes("--python")) {
-    await upgradePython();
-  } else {
-    await upgradeSelf();
+export interface PythonPin {
+  version: string;
+  /** Full python-build-standalone identifier, for example 3.14.7+20260901. */
+  build?: string;
+}
+
+/** Parse an exact CPython version, optionally qualified by the immutable
+ *  python-build-standalone release/build identifier. */
+export function parsePythonPin(value: string): PythonPin {
+  const match = value.match(/^(\d+\.\d+\.\d+)(?:\+(\d+))?$/);
+  if (!match) {
+    throw new Error(
+      `invalid python version: ${value}; expected X.Y.Z or X.Y.Z+BUILD`,
+    );
   }
+  return {
+    version: match[1],
+    build: match[2] ? `${match[1]}+${match[2]}` : undefined,
+  };
+}
+
+export async function upgrade(args: string[]) {
+  if (args.length === 0) {
+    await upgradeSelf();
+    return;
+  }
+
+  let requested: string | undefined;
+  if (args[0] === "--python") {
+    if (args.length > 2) {
+      throw new Error("usage: pyr upgrade --python [X.Y.Z[+BUILD]]");
+    }
+    requested = args[1];
+  } else if (args.length === 1 && args[0].startsWith("--python=")) {
+    requested = args[0].slice("--python=".length);
+    if (!requested) {
+      throw new Error("usage: pyr upgrade --python [X.Y.Z[+BUILD]]");
+    }
+  } else {
+    throw new Error("usage: pyr upgrade [--python [X.Y.Z[+BUILD]]]");
+  }
+
+  await upgradePython(requested === undefined ? undefined : parsePythonPin(requested));
 }
 
 // --- helpers ---
@@ -664,11 +738,11 @@ export async function readPyprojectDeps(
   } catch {
     return [];
   }
-  const parsed = parseToml(text) as Record<string, unknown>;
-  const project = parsed.project as Record<string, unknown> | undefined;
-  const deps = project?.dependencies;
-  if (!Array.isArray(deps)) return [];
-  return deps.filter((d): d is string => typeof d === "string");
+  const project = locateProjectTable(text);
+  if (!project) return [];
+  const dependencies = locateDepsArray(text, project.start, project.end);
+  if (!dependencies) return [];
+  return parseDepsArray(text.slice(dependencies.open, dependencies.close + 1));
 }
 
 /** Add or replace a dependency spec in pyproject.toml [project].dependencies.
@@ -946,6 +1020,17 @@ export async function managedPythonVersion(): Promise<string | null> {
   }
 }
 
+/** Exact python-build-standalone build installed under PYR_HOME. Kept
+ *  separately from the CPython version so same-version upstream rebuilds can
+ *  be selected without changing the version stamps used by project venvs. */
+export async function managedPythonBuild(): Promise<string | null> {
+  try {
+    return (await Deno.readTextFile(`${PYR_HOME}/python/.build`)).trim();
+  } catch {
+    return null;
+  }
+}
+
 export async function venvPythonVersion(): Promise<string | null> {
   try {
     return (await Deno.readTextFile(venvPaths().stamp)).trim();
@@ -1023,16 +1108,22 @@ async function ensureVenv() {
 
 // --- upgrade ---
 
-async function upgradePython() {
-  const current = await managedPythonVersion();
-  await installPython();
+async function upgradePython(pin?: PythonPin) {
+  const currentVersion = await managedPythonVersion();
+  const currentBuild = await managedPythonBuild();
+  await installPython(pin);
 
-  const updated = await managedPythonVersion();
-  if (current === updated) {
-    console.log(`already on latest (${current})`);
+  const updatedVersion = await managedPythonVersion();
+  const updatedBuild = await managedPythonBuild();
+  const current = currentBuild ?? currentVersion;
+  const updated = updatedBuild ?? updatedVersion;
+  if (currentVersion === updatedVersion && currentBuild === updatedBuild) {
+    console.log(`already on ${pin ? "requested" : "latest"} python (${updated})`);
   } else {
     console.log(`upgraded ${current} -> ${updated}`);
-    console.log("project venvs will rebuild on next pyr run");
+    if (currentVersion !== updatedVersion) {
+      console.log("project venvs will rebuild on next pyr run");
+    }
   }
 }
 
@@ -1246,7 +1337,7 @@ export async function ensurePython(): Promise<string> {
 
 /** Bootstrap and upgrade share one installer. Keep the live tree until a
  *  replacement has actually run, including when repairing a partial install. */
-async function installPython(): Promise<string> {
+async function installPython(pin?: PythonPin): Promise<string> {
   // Resolve the platform before creating the lock. An unsupported target must
   // never leave a lock behind, even if platform detection changes to exit or
   // throw differently in the future.
@@ -1266,49 +1357,88 @@ async function installPython(): Promise<string> {
   }
 
   try {
-    return await installPythonLocked(triple);
+    return await installPythonLocked(triple, pin);
   } finally {
     await Deno.remove(lock);
   }
 }
 
-async function installPythonLocked(triple: string): Promise<string> {
+async function installPythonLocked(triple: string, pin?: PythonPin): Promise<string> {
   const pythonBin = managedPython();
 
+  const releaseTag = pin?.build?.slice(pin.version.length + 1);
+  const releaseUrl = releaseTag
+    ? `https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/${
+      encodeURIComponent(releaseTag)
+    }`
+    : "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest";
+
   const resp = await fetch(
-    "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest",
+    releaseUrl,
     { headers: githubHeaders() },
   );
 
   if (!resp.ok) {
     await resp.body?.cancel();
+    if (pin?.build) {
+      throw new Error(
+        `requested python build ${pin.build} is unavailable (github api: ${resp.status}); ` +
+          "existing python is untouched",
+      );
+    }
     throw new Error(`github api error: ${resp.status}; existing python is untouched`);
   }
 
-  const release = await resp.json() as { assets: GithubReleaseAsset[] };
+  const release = await resp.json() as { tag_name?: string; assets: GithubReleaseAsset[] };
+  if (releaseTag && release.tag_name !== releaseTag) {
+    throw new Error(
+      `requested python build ${pin!.build} resolved an unexpected upstream release; ` +
+        "existing python is untouched",
+    );
+  }
 
   const pattern = new RegExp(
-    `cpython-(\\d+\\.\\d+\\.\\d+)\\+\\d+-${triple}-install_only\\.tar\\.gz$`,
+    `^cpython-(\\d+\\.\\d+\\.\\d+)\\+(\\d+)-${triple}-install_only\\.tar\\.gz$`,
   );
 
-  const assets = release.assets
-    .filter((a: { name: string }) => pattern.test(a.name))
-    .sort((a: { name: string }, b: { name: string }) => {
-      const va = a.name.match(pattern)![1];
-      const vb = b.name.match(pattern)![1];
-      return vb.localeCompare(va, undefined, { numeric: true });
+  let builds = release.assets
+    .flatMap((asset) => {
+      const match = asset.name.match(pattern);
+      return match ? [{ asset, version: match[1], build: `${match[1]}+${match[2]}` }] : [];
     });
 
-  if (assets.length === 0) {
+  if (pin) {
+    builds = builds.filter((candidate) =>
+      candidate.version === pin.version && (!pin.build || candidate.build === pin.build)
+    );
+  }
+
+  builds.sort((a, b) =>
+    b.version.localeCompare(a.version, undefined, { numeric: true }) ||
+    b.build.localeCompare(a.build, undefined, { numeric: true })
+  );
+
+  if (builds.length === 0) {
+    if (pin) {
+      throw new Error(
+        `requested python ${pin.build ?? pin.version} has no ${triple} install-only asset in ` +
+          `${releaseTag ? `upstream release ${releaseTag}` : "the upstream latest release"}; ` +
+          "existing python is untouched",
+      );
+    }
     throw new Error(`no python build found for ${triple}; existing python is untouched`);
   }
 
-  const asset = assets[0];
-  const version = asset.name.match(pattern)![1];
+  const { asset, version, build } = builds[0];
 
-  // The version stamp alone cannot establish that an interrupted install is
-  // usable. Probe it before skipping a same-version download.
-  if (await managedPythonVersion() === version && await pythonReportsVersion(pythonBin, version)) {
+  // The semantic version alone cannot distinguish upstream rebuilds. Require
+  // the exact build stamp too, then probe the runtime before skipping a
+  // download. Legacy installs without .build refresh on the next explicit
+  // `pyr upgrade --python`.
+  if (
+    await managedPythonVersion() === version && await managedPythonBuild() === build &&
+    await pythonReportsVersion(pythonBin, version)
+  ) {
     return pythonBin;
   }
   const expectedSha256 = await releaseAssetSha256(release, asset.name);
@@ -1318,7 +1448,7 @@ async function installPythonLocked(triple: string): Promise<string> {
   const staged = `${work}/python`;
   let preserveWork = false;
   try {
-    console.log(`downloading cpython ${version}...`);
+    console.log(`downloading cpython ${build}...`);
     const tarPath = `${work}/python.tar.gz`;
     await downloadFile(
       asset.browser_download_url,
@@ -1354,6 +1484,7 @@ async function installPythonLocked(triple: string): Promise<string> {
       throw new Error(`downloaded python failed verification (expected ${version})`);
     }
     await Deno.writeTextFile(`${staged}/.version`, version);
+    await Deno.writeTextFile(`${staged}/.build`, build);
 
     const live = `${PYR_HOME}/python`;
     const previous = `${work}/previous`;
@@ -1386,7 +1517,7 @@ async function installPythonLocked(triple: string): Promise<string> {
     if (!preserveWork) await Deno.remove(work, { recursive: true }).catch(() => {});
   }
 
-  console.log(`python ${version} ready`);
+  console.log(`python ${build} ready`);
   return pythonBin;
 }
 

@@ -3,12 +3,9 @@
   "specifiers": {
     "jsr:@luca/esbuild-deno-loader@0.11.0": "0.11.0",
     "jsr:@std/bytes@^1.0.2": "1.0.6",
-    "jsr:@std/cli@1": "1.0.28",
-    "jsr:@std/collections@^1.1.3": "1.1.6",
     "jsr:@std/encoding@^1.0.5": "1.0.10",
     "jsr:@std/internal@^1.0.12": "1.0.12",
-    "jsr:@std/path@^1.0.6": "1.1.4",
-    "jsr:@std/toml@1": "1.0.11"
+    "jsr:@std/path@^1.0.6": "1.1.4"
   },
   "jsr": {
     "@luca/esbuild-deno-loader@0.11.0": {
@@ -22,12 +19,6 @@
     "@std/bytes@1.0.6": {
       "integrity": "f6ac6adbd8ccd99314045f5703e23af0a68d7f7e58364b47d2c7f408aeb5820a"
     },
-    "@std/cli@1.0.28": {
-      "integrity": "74ef9b976db59ca6b23a5283469c9072be6276853807a83ec6c7ce412135c70a"
-    },
-    "@std/collections@1.1.6": {
-      "integrity": "b458160ce65ea5ad35da05d0a5cbee4b583677c8b443a10d7beb0c4ac63f2baa"
-    },
     "@std/encoding@1.0.10": {
       "integrity": "8783c6384a2d13abd5e9e87a7ae0520a30e9f56aeeaa3bdf910a3eaaf5c811a1"
     },
@@ -38,12 +29,6 @@
       "integrity": "1d2d43f39efb1b42f0b1882a25486647cb851481862dc7313390b2bb044314b5",
       "dependencies": [
         "jsr:@std/internal"
-      ]
-    },
-    "@std/toml@1.0.11": {
-      "integrity": "e084988b872ca4bad6aedfb7350f6eeed0e8ba88e9ee5e1590621c5b5bb8f715",
-      "dependencies": [
-        "jsr:@std/collections"
       ]
     }
   },
@@ -402,11 +387,5 @@
     "https://esm.sh/@babel/helper-validator-identifier@7.22.20": "3b0b7d94b8ac689175ecb7e72183b07c6a771cc7680a7c9916091add73bd7f88",
     "https://esm.sh/preact@10.24.3/hooks": "ee9690efd09ca5367bdc2a2d2f52426a4c6745f75003b8ad3de3a5efd42e4c74",
     "https://esm.sh/preact@10.24.3/jsx-runtime": "4d6c076f87819789de9f2339dcb5d1bc4c9624b3f78e64ee7050972dff54211c"
-  },
-  "workspace": {
-    "dependencies": [
-      "jsr:@std/cli@1",
-      "jsr:@std/toml@1"
-    ]
   }
 }

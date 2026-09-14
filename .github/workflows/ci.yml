@@ -20,8 +20,8 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: dorny/paths-filter@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
           filters: |
@@ -38,8 +38,8 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: denoland/setup-deno@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: v2.x
       - name: fmt
@@ -87,11 +87,17 @@ jobs:
             target: aarch64-pc-windows-msvc
             installer: true
     runs-on: ${{ matrix.os }}
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: denoland/setup-deno@v2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: v2.x
+
+      - name: test on native Windows
+        shell: pwsh
+        run: deno test -A
 
       - name: compile native binary
         shell: pwsh
@@ -120,6 +126,40 @@ jobs:
           $ErrorActionPreference = "Stop"
           $env:PYR_HOME = Join-Path $pwd "installer-home"
           & pwsh -NoProfile -NonInteractive -File .\site\assets\install.ps1
+          $installed = Join-Path $env:PYR_HOME "bin\pyr.exe"
+          if (-not (Test-Path $installed)) { throw "installer did not produce $installed" }
+          $version = (& $installed --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^\d+\.\d+\.\d+$') { throw "installed binary failed: $version" }
+
+      # Git Bash must launch the native Windows binary, use USERPROFILE rather
+      # than its POSIX-looking HOME, and keep using Windows' bundled tar.exe.
+      - name: Git Bash native bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          profile="$(pwd -W)/git-bash-profile"
+          decoy_home="$(pwd -W)/git-bash-home-decoy"
+          export USERPROFILE="$profile"
+          export HOME="$decoy_home"
+          unset PYR_HOME
+          ./pyr.exe init git-bash-smoketest
+          test -f git-bash-smoketest/app/main.py
+          test -f "$(cygpath -u "$profile")/.pyr/python/python.exe"
+          test ! -e "$(cygpath -u "$decoy_home")/.pyr"
+          output="$(cd git-bash-smoketest && ../pyr.exe run 2>&1)"
+          printf '%s\n' "$output"
+          grep -q "hello world" <<< "$output"
+
+      # The TLS override in install.ps1 exists for Windows PowerShell 5.1.
+      # Exercise that host explicitly on x86_64 in addition to PowerShell 7.
+      - name: installer script (Windows PowerShell 5.1)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:PYR_HOME = Join-Path $pwd "installer-home-windows-powershell"
+          & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\site\assets\install.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Windows PowerShell installer failed with exit code $LASTEXITCODE" }
           $installed = Join-Path $env:PYR_HOME "bin\pyr.exe"
           if (-not (Test-Path $installed)) { throw "installer did not produce $installed" }
           $version = (& $installed --version | Out-String).Trim()
@@ -161,8 +201,8 @@ jobs:
             binary: pyr.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: denoland/setup-deno@v2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: v2.x
 
@@ -208,7 +248,7 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ matrix.artifact }}
 
@@ -336,7 +376,7 @@ jobs:
           fi
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
