@@ -1,4 +1,8 @@
-import { assertEquals, assertMatch } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assertEquals,
+  assertMatch,
+  assertThrows,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { fileURLToPath as fromFileUrl } from "node:url";
 import {
   addPyprojectDep,
@@ -8,6 +12,7 @@ import {
   gitignore,
   isWindows,
   managedPython,
+  parsePythonPin,
   parseRequirementName,
   parseSha256Sums,
   platformTriple,
@@ -21,6 +26,7 @@ import {
   sha256Hex,
   stamp,
   sync,
+  userHome,
   venvPaths,
   writeLock,
 } from "./lib.ts";
@@ -149,6 +155,48 @@ Deno.test("pyrHome honors PYR_HOME", () => {
   }
 });
 
+Deno.test("native Windows prefers USERPROFILE while Unix prefers HOME", () => {
+  const previousHome = Deno.env.get("HOME");
+  const previousProfile = Deno.env.get("USERPROFILE");
+  try {
+    Deno.env.set("HOME", "/c/Users/fleet-user");
+    Deno.env.set("USERPROFILE", "C:\\Users\\fleet-user");
+    assertEquals(
+      userHome(),
+      isWindows() ? "C:\\Users\\fleet-user" : "/c/Users/fleet-user",
+    );
+  } finally {
+    if (previousHome === undefined) Deno.env.delete("HOME");
+    else Deno.env.set("HOME", previousHome);
+    if (previousProfile === undefined) Deno.env.delete("USERPROFILE");
+    else Deno.env.set("USERPROFILE", previousProfile);
+  }
+});
+
+Deno.test("release dependency graph has no JSR modules", async () => {
+  const mainTs = fromFileUrl(new URL("./main.ts", import.meta.url));
+  const configPath = fromFileUrl(new URL("./deno.json", import.meta.url));
+  const result = await new Deno.Command(Deno.execPath(), {
+    args: ["info", "--json", "--config", configPath, mainTs],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  assertEquals(result.success, true, new TextDecoder().decode(result.stderr));
+  const graph = new TextDecoder().decode(result.stdout);
+  assertEquals(/(?:jsr:|https:\/\/jsr\.io\/)/.test(graph), false);
+});
+
+Deno.test("parsePythonPin accepts exact versions and build-qualified pins", () => {
+  assertEquals(parsePythonPin("3.14.7"), { version: "3.14.7", build: undefined });
+  assertEquals(parsePythonPin("3.14.7+20260901"), {
+    version: "3.14.7",
+    build: "3.14.7+20260901",
+  });
+  for (const invalid of ["3.14", "latest", "v3.14.7", "3.14.7+", "3.14.7+nightly"]) {
+    assertThrows(() => parsePythonPin(invalid), Error, "expected X.Y.Z or X.Y.Z+BUILD");
+  }
+});
+
 // --- requirement parsing ---
 
 Deno.test("canonicalizeName follows PEP 503", () => {
@@ -249,6 +297,22 @@ Deno.test("readPyprojectDeps preserves specs with extras and constraints", async
     assertEquals(await readPyprojectDeps(path), [
       "requests>=2,<3",
       "httpx[http2]==0.27.0",
+    ]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("readPyprojectDeps decodes quoted markers and ignores later tables", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = `${dir}/pyproject.toml`;
+  try {
+    await Deno.writeTextFile(
+      path,
+      `[project]\ndependencies = [\n  "typing-extensions; python_version < \\"3.13\\"", # compatibility\n]\n\n[tool.example]\ndependencies = ["wrong"]\n`,
+    );
+    assertEquals(await readPyprojectDeps(path), [
+      'typing-extensions; python_version < "3.13"',
     ]);
   } finally {
     await Deno.remove(dir, { recursive: true });
@@ -503,6 +567,18 @@ Deno.test("handler failures are concise and do not escape as uncaught promises",
     assertEquals(result.code, 1);
     assertEquals(result.stderr.includes("Uncaught"), false);
     assertEquals(result.stderr.trim().length > 0, true);
+  } finally {
+    await Deno.remove(tmp, { recursive: true });
+  }
+});
+
+Deno.test("top-level parser rejects unknown options before dispatch", async () => {
+  const tmp = await Deno.makeTempDir();
+  try {
+    const result = await runPyr(tmp, ["--typo", "init", "must-not-exist"]);
+    assertEquals(result.code, 1);
+    assertMatch(result.stderr, /unknown option: --typo/);
+    assertEquals(await exists(`${tmp}/must-not-exist`), false);
   } finally {
     await Deno.remove(tmp, { recursive: true });
   }

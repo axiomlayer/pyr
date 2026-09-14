@@ -13,10 +13,6 @@
       "tags": ["recommended"]
     }
   },
-  "imports": {
-    "@std/cli": "jsr:@std/cli@^1",
-    "@std/toml": "jsr:@std/toml@^1"
-  },
   "tasks": {
     "test": "deno test -A"
   }
