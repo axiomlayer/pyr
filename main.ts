@@ -168,4 +168,9 @@ if (subArgs[0] === "--help" || subArgs[0] === "-h") {
 // and shouldn't be forwarded to handlers.
 const handlerArgs = subArgs[0] === "--" ? subArgs.slice(1) : subArgs;
 
-await cmd.handler(handlerArgs);
+try {
+  await cmd.handler(handlerArgs);
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  Deno.exit(1);
+}

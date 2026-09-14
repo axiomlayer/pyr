@@ -1140,8 +1140,7 @@ async function upgradeSelf() {
 
 // --- bootstrap ---
 
-export function platformTriple(): string {
-  const { os, arch } = Deno.build;
+export function platformTripleFor(os: string, arch: string): string {
   const triples: Record<string, Record<string, string>> = {
     darwin: {
       aarch64: "aarch64-apple-darwin",
@@ -1158,10 +1157,13 @@ export function platformTriple(): string {
   };
   const triple = triples[os]?.[arch];
   if (!triple) {
-    console.error(`unsupported platform: ${os}-${arch}`);
-    Deno.exit(1);
+    throw new Error(`unsupported platform: ${os}-${arch}`);
   }
   return triple;
+}
+
+export function platformTriple(): string {
+  return platformTripleFor(Deno.build.os, Deno.build.arch);
 }
 
 export async function ensurePython(): Promise<string> {
@@ -1185,6 +1187,10 @@ export async function ensurePython(): Promise<string> {
 /** Bootstrap and upgrade share one installer. Keep the live tree until a
  *  replacement has actually run, including when repairing a partial install. */
 async function installPython(): Promise<string> {
+  // Resolve the platform before creating the lock. An unsupported target must
+  // never leave a lock behind, even if platform detection changes to exit or
+  // throw differently in the future.
+  const triple = platformTriple();
   await Deno.mkdir(PYR_HOME, { recursive: true });
   const lock = `${PYR_HOME}/.python-install-lock`;
   try {
@@ -1200,15 +1206,14 @@ async function installPython(): Promise<string> {
   }
 
   try {
-    return await installPythonLocked();
+    return await installPythonLocked(triple);
   } finally {
     await Deno.remove(lock);
   }
 }
 
-async function installPythonLocked(): Promise<string> {
+async function installPythonLocked(triple: string): Promise<string> {
   const pythonBin = managedPython();
-  const triple = platformTriple();
 
   const resp = await fetch(
     "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest",
