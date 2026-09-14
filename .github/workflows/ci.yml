@@ -30,6 +30,9 @@ jobs:
               - 'deno.json'
               - 'deno.lock'
               - '.github/workflows/**'
+              - 'README.md'
+              - 'site/assets/**'
+              - 'site/routes/**'
   check:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -50,7 +53,7 @@ jobs:
 
   verify:
     if: always()
-    needs: [changes, check]
+    needs: [changes, check, windows-native]
     runs-on: ubuntu-latest
     steps:
       - name: pass
@@ -60,9 +63,65 @@ jobs:
             exit 0
           fi
           if [ "${{ needs.check.result }}" = "success" ]; then
-            exit 0
+            if [ "${{ github.event_name }}" != "pull_request" ] || [ "${{ needs.windows-native.result }}" = "success" ]; then
+              exit 0
+            fi
           fi
           exit 1
+
+  # PRs must exercise the binary on native Windows runners. The push-only
+  # build/smoke matrix below protects main and release artifacts; this job
+  # closes the review-time gap and also runs the installer script on x86_64.
+  windows-native:
+    needs: check
+    if: github.event_name == 'pull_request' && needs.check.result == 'success'
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            installer: true
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            installer: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: compile native binary
+        shell: pwsh
+        run: deno compile -A --target ${{ matrix.target }} --output pyr.exe main.ts
+
+      - name: native init and run
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $help = (& .\pyr.exe 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $help -notmatch "usage") { throw "native help failed" }
+          & .\pyr.exe init smoketest
+          if (-not (Test-Path smoketest\app\main.py)) { throw "native init did not scaffold" }
+          Push-Location smoketest
+          try {
+            $output = (& ..\pyr.exe run 2>&1 | Out-String)
+            if ($LASTEXITCODE -ne 0 -or $output -notmatch "hello world") { throw "native run failed: $output" }
+          } finally {
+            Pop-Location
+          }
+
+      - name: installer script
+        if: matrix.installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:PYR_HOME = Join-Path $pwd "installer-home"
+          & pwsh -NoProfile -NonInteractive -File .\site\assets\install.ps1
+          $installed = Join-Path $env:PYR_HOME "bin\pyr.exe"
+          if (-not (Test-Path $installed)) { throw "installer did not produce $installed" }
+          $version = (& $installed --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^\d+\.\d+\.\d+$') { throw "installed binary failed: $version" }
 
   # Build every release target and upload each as a named artifact. The smoke
   # job pulls these artifacts back down and exercises them, so a failed

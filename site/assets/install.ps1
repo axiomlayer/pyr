@@ -18,13 +18,39 @@ switch ($env:PROCESSOR_ARCHITECTURE) {
     default { Write-Error "unsupported arch: $env:PROCESSOR_ARCHITECTURE"; exit 1 }
 }
 
-$Url = "https://github.com/$Repo/releases/latest/download/pyr-$target.zip"
+$AssetName = "pyr-$target.zip"
+$Headers = @{ Accept = "application/vnd.github+json" }
+$Release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers $Headers
+$Tag = [string]$Release.tag_name
+if ($Tag -notmatch '^v[0-9A-Za-z._-]+$') {
+    throw "invalid latest release tag"
+}
+$BaseUrl = "https://github.com/$Repo/releases/download/$Tag"
+$Url = "$BaseUrl/$AssetName"
 Write-Host "installing pyr..."
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
 New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
     $zipPath = Join-Path $tmp "pyr.zip"
+    $sumsPath = Join-Path $tmp "SHA256SUMS"
+    Invoke-WebRequest -Uri "$BaseUrl/SHA256SUMS" -OutFile $sumsPath -UseBasicParsing
+    $expected = $null
+    foreach ($line in Get-Content -LiteralPath $sumsPath) {
+        $parts = $line -split '\s+', 2
+        if ($parts.Count -eq 2 -and $parts[1].TrimStart('*') -eq $AssetName) {
+            $expected = $parts[0]
+            break
+        }
+    }
+    if ([string]::IsNullOrEmpty($expected) -or $expected -notmatch '^[0-9A-Fa-f]{64}$') {
+        throw "SHA256SUMS has no valid entry for $AssetName"
+    }
+
     Invoke-WebRequest -Uri $Url -OutFile $zipPath -UseBasicParsing
+    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash
+    if ($actual -ine $expected) {
+        throw "SHA-256 mismatch for $AssetName"
+    }
     Expand-Archive -Path $zipPath -DestinationPath $tmp -Force
 
     if (-not (Test-Path $InstallDir)) {

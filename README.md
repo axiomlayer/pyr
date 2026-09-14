@@ -30,8 +30,10 @@ irm https://pyrun.dev/install.ps1 | iex
 
 Installs `pyr.exe` to `%USERPROFILE%\.pyr\bin\`. Add this to your `PATH`.
 
-Releases after v0.1.0 also publish a `SHA256SUMS` file next to the zips, for installers that pin a
-release by digest rather than trusting `latest`.
+Every release publishes a `SHA256SUMS` file next to the zips. The installers resolve one release
+tag, verify the selected ZIP against that manifest, and only then install it; `pyr upgrade` and the
+managed CPython bootstrap apply the same fail-closed check. The v0.1.0 manifest was backfilled for
+compatibility with the first release.
 
 ---
 
@@ -91,8 +93,9 @@ myapp/
 
 Python bootstrap and upgrade use the same installer. `pyr upgrade --python` checks release metadata
 once and skips the download when the installed CPython version already matches and passes a runtime
-check. Otherwise it downloads, extracts, and checks the replacement before moving the existing
-runtime. A failed replacement move restores the previous installation.
+check. Otherwise it obtains the upstream checksum manifest, verifies the archive before extracting,
+then checks the replacement before moving the existing runtime. A failed replacement move restores
+the previous installation.
 
 For a deep dive, see:
 

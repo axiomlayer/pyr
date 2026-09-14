@@ -11,9 +11,10 @@ Deno.test("Python installation preserves the live runtime until replacement is v
   const root = await Deno.makeTempDir();
   const runtimeHome = `${root.replaceAll("\\", "/")}/pyr home`;
   Deno.env.set("PYR_HOME", runtimeHome);
-  const { ensurePython, upgrade, managedPython, platformTriple, isWindows } = await import(
-    `./lib.ts?python-install-test=${crypto.randomUUID()}`
-  );
+  const { ensurePython, upgrade, managedPython, platformTriple, isWindows, sha256Hex } =
+    await import(
+      `./lib.ts?python-install-test=${crypto.randomUUID()}`
+    );
   const version = "3.14.1";
   const binaryRelative = isWindows() ? "python.exe" : "bin/python3";
   const archiveRoot = `${root}/archive`;
@@ -31,17 +32,24 @@ Deno.test("Python installation preserves the live runtime until replacement is v
   }).output();
   assertEquals(packed.success, true, new TextDecoder().decode(packed.stderr));
   const archiveBytes = await Deno.readFile(archive);
+  const archiveDigest = await sha256Hex(archiveBytes);
   const releaseUrl =
     "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest";
   const assetUrl = "https://example.invalid/python.tar.gz";
+  const checksumUrl = "https://example.invalid/SHA256SUMS";
+  const assetName = `cpython-${version}+20260914-${platformTriple()}-install_only.tar.gz`;
   const release = {
     assets: [{
-      name: `cpython-${version}+20260914-${platformTriple()}-install_only.tar.gz`,
+      name: assetName,
       browser_download_url: assetUrl,
+    }, {
+      name: "SHA256SUMS",
+      browser_download_url: checksumUrl,
     }],
   };
   let calls: string[] = [];
   let releaseResponse: () => Response = () => Response.json(release);
+  let checksumResponse: () => Response = () => new Response(`${archiveDigest}  ${assetName}\n`);
   let downloadResponse: () => Response = () => new Response(archiveBytes);
   let reportedVersion: string | undefined;
   let failPromotion = false;
@@ -51,6 +59,7 @@ Deno.test("Python installation preserves the live runtime until replacement is v
     const url = String(input);
     calls.push(`${init?.method ?? "GET"} ${url}`);
     if (url === releaseUrl) return Promise.resolve(releaseResponse());
+    if (url === checksumUrl) return Promise.resolve(checksumResponse());
     if (url === assetUrl) return Promise.resolve(downloadResponse());
     throw new Error(`unexpected network request: ${url}`);
   };
@@ -98,6 +107,7 @@ Deno.test("Python installation preserves the live runtime until replacement is v
     }
     calls = [];
     releaseResponse = () => Response.json(release);
+    checksumResponse = () => new Response(`${archiveDigest}  ${assetName}\n`);
     downloadResponse = () => new Response(archiveBytes);
     reportedVersion = undefined;
     failPromotion = false;
@@ -144,10 +154,24 @@ Deno.test("Python installation preserves the live runtime until replacement is v
       await assertRejects(() => upgrade(["--python"]), Error, "no python build found");
       await assertPreserved();
     });
+    await t.step("missing checksum manifest leaves Python untouched", async () => {
+      await reset();
+      releaseResponse = () => Response.json({ assets: [release.assets[0]] });
+      await assertRejects(() => upgrade(["--python"]), Error, "no SHA256SUMS");
+      await assertPreserved();
+    });
     await t.step("asset HTTP failure leaves the current runtime intact", async () => {
       await reset();
       downloadResponse = () => new Response("unavailable", { status: 503 });
       await assertRejects(() => upgrade(["--python"]), Error, "download failed");
+      await assertPreserved();
+    });
+    await t.step("tampered archive is rejected before extraction", async () => {
+      await reset();
+      const tampered = archiveBytes.slice();
+      tampered[0] ^= 0xff;
+      downloadResponse = () => new Response(tampered);
+      await assertRejects(() => upgrade(["--python"]), Error, "SHA-256 mismatch");
       await assertPreserved();
     });
     await t.step("interrupted download removes staging and keeps the current runtime", async () => {
@@ -167,7 +191,7 @@ Deno.test("Python installation preserves the live runtime until replacement is v
     await t.step("invalid archive cannot replace Python", async () => {
       await reset();
       downloadResponse = () => new Response("not a tar archive");
-      await assertRejects(() => upgrade(["--python"]), Error, "failed to extract python");
+      await assertRejects(() => upgrade(["--python"]), Error, "SHA-256 mismatch");
       await assertPreserved();
     });
     await t.step("incorrect interpreter version cannot replace Python", async () => {
@@ -201,7 +225,7 @@ Deno.test("Python installation preserves the live runtime until replacement is v
         assertEquals(await Deno.readTextFile(managedPython()), version);
         assertEquals(await Deno.readTextFile(`${runtimeHome}/python/.version`), version);
         assertEquals(Array.from(Deno.readDirSync(runtimeHome), (e) => e.name), ["python"]);
-        assertEquals(calls, [`GET ${releaseUrl}`, `GET ${assetUrl}`]);
+        assertEquals(calls, [`GET ${releaseUrl}`, `GET ${checksumUrl}`, `GET ${assetUrl}`]);
       },
     );
     await t.step("fresh bootstrap and partial-install repair use the same installer", async () => {
@@ -214,7 +238,7 @@ Deno.test("Python installation preserves the live runtime until replacement is v
         assertEquals(await ensurePython(), managedPython());
         assertEquals(await Deno.readTextFile(managedPython()), version);
         assertEquals(await Deno.readTextFile(`${runtimeHome}/python/.version`), version);
-        assertEquals(calls, [`GET ${releaseUrl}`, `GET ${assetUrl}`]);
+        assertEquals(calls, [`GET ${releaseUrl}`, `GET ${checksumUrl}`, `GET ${assetUrl}`]);
       }
     });
     await t.step(
