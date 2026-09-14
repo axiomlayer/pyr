@@ -30,6 +30,9 @@ irm https://pyrun.dev/install.ps1 | iex
 
 Installs `pyr.exe` to `%USERPROFILE%\.pyr\bin\`. Add this to your `PATH`.
 
+Every release also publishes a `SHA256SUMS` file next to the zips, for installers that
+pin a release by digest rather than trusting `latest`.
+
 ---
 
 ## **Quickstart**

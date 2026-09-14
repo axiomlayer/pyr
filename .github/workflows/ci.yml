@@ -282,7 +282,14 @@ jobs:
           run-id: ${{ steps.find.outputs.run_id }}
           merge-multiple: true
 
+      # A SHA256SUMS beside the zips lets an installer pin a release by digest
+      # instead of trusting whatever "latest" resolves to on the day.
+      - name: checksums
+        run: sha256sum *.zip > SHA256SUMS
+
       - name: release
         uses: softprops/action-gh-release@v3
         with:
-          files: "*.zip"
+          files: |
+            *.zip
+            SHA256SUMS
