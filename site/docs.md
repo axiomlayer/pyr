@@ -104,8 +104,21 @@ myapp/
 
 ## How upgrades propagate
 
-`pyr upgrade --python` swaps out `~/.pyr/python` with the latest CPython
-release. The next time you run `pyr run` (or any command that touches the venv)
+`pyr upgrade --python` checks release metadata once. If the installed CPython
+version already matches and runs successfully, no archive is downloaded. Otherwise
+pyr downloads and extracts into a temporary directory beside the live runtime,
+checks the interpreter's version and venv tooling, and then replaces `~/.pyr/python`.
+Download, extraction, and verification failures leave the existing tree in place;
+if moving the replacement fails, pyr restores the previous tree.
+
+Only one Python installer may run per `PYR_HOME` at a time. An interrupted process
+can leave `.python-install-lock` and a `.python-install-*` directory there. Confirm
+no installer is running before removing a stale lock. If the live `python` directory
+is absent and staging contains `previous`, restore `previous` to `python` first.
+If rollback itself fails, pyr prints the retained previous directory for recovery.
+This is failure recovery, not a guarantee against power loss during the two renames.
+
+The next time you run `pyr run` (or any command that touches the venv)
 in any project, pyr notices the version stamp in `.venv/.pyr-python` no longer
 matches and silently rebuilds the venv from the new managed python, reinstalling
 everything from `requirements.txt`.

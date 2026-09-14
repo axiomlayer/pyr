@@ -1,5 +1,5 @@
 import { assertEquals, assertMatch } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { fromFileUrl } from "https://deno.land/std@0.224.0/path/mod.ts";
+import { fileURLToPath as fromFileUrl } from "node:url";
 import {
   addPyprojectDep,
   basename,

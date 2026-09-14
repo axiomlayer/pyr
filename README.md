@@ -86,6 +86,11 @@ myapp/
 - **TOML Surgery:** Edits `pyproject.toml` without destroying comments or formatting.
 - **Self-Upgrades:** Replaces the running binary with the latest release.
 
+Python bootstrap and upgrade use the same installer. `pyr upgrade --python` checks release metadata
+once and skips the download when the installed CPython version already matches and passes a runtime
+check. Otherwise it downloads, extracts, and checks the replacement before moving the existing
+runtime. A failed replacement move restores the previous installation.
+
 For a deep dive, see:
 
 - [How pyr Works](https://jasencarroll.com/how-pyr-works.html)

@@ -951,27 +951,7 @@ async function ensureVenv() {
 
 async function upgradePython() {
   const current = await managedPythonVersion();
-
-  // Probe the GitHub API before destroying the existing install. If we're
-  // offline (or rate-limited, or the endpoint is down), bail with a useful
-  // message instead of leaving the user without a working python.
-  const probe = await fetch(
-    "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest",
-    { method: "HEAD", headers: githubHeaders() },
-  ).catch(() => null);
-  if (!probe || !probe.ok) {
-    console.error("cannot reach github to check for updates");
-    console.error("your existing python install is untouched");
-    Deno.exit(1);
-  }
-
-  try {
-    await Deno.remove(`${PYR_HOME}/python`, { recursive: true });
-  } catch {
-    // nothing to remove
-  }
-
-  await ensurePython();
+  await installPython();
 
   const updated = await managedPythonVersion();
   if (current === updated) {
@@ -1198,15 +1178,36 @@ export async function ensurePython(): Promise<string> {
     // not cached or partial install; bootstrap it
   }
 
-  // If a partial install is present, clear it before bootstrapping — tar
-  // --strip-components doesn't overwrite a populated tree cleanly.
+  console.log("bootstrapping python...");
+  return await installPython();
+}
+
+/** Bootstrap and upgrade share one installer. Keep the live tree until a
+ *  replacement has actually run, including when repairing a partial install. */
+async function installPython(): Promise<string> {
+  await Deno.mkdir(PYR_HOME, { recursive: true });
+  const lock = `${PYR_HOME}/.python-install-lock`;
   try {
-    await Deno.remove(`${PYR_HOME}/python`, { recursive: true });
-  } catch {
-    // nothing to remove
+    await Deno.mkdir(lock);
+  } catch (error) {
+    if (error instanceof Deno.errors.AlreadyExists) {
+      throw new Error(
+        `python installation is locked: ${lock}; if a previous pyr was interrupted, ` +
+          "confirm no installer is running and inspect .python-install-* before removing the lock",
+      );
+    }
+    throw error;
   }
 
-  console.log("bootstrapping python...");
+  try {
+    return await installPythonLocked();
+  } finally {
+    await Deno.remove(lock);
+  }
+}
+
+async function installPythonLocked(): Promise<string> {
+  const pythonBin = managedPython();
   const triple = platformTriple();
 
   const resp = await fetch(
@@ -1215,8 +1216,8 @@ export async function ensurePython(): Promise<string> {
   );
 
   if (!resp.ok) {
-    console.error(`github api error: ${resp.status}`);
-    Deno.exit(1);
+    await resp.body?.cancel();
+    throw new Error(`github api error: ${resp.status}; existing python is untouched`);
   }
 
   const release = await resp.json();
@@ -1234,82 +1235,119 @@ export async function ensurePython(): Promise<string> {
     });
 
   if (assets.length === 0) {
-    console.error(`no python build found for ${triple}`);
-    Deno.exit(1);
+    throw new Error(`no python build found for ${triple}; existing python is untouched`);
   }
 
   const asset = assets[0];
   const version = asset.name.match(pattern)![1];
 
-  console.log(`downloading cpython ${version}...`);
-
-  await Deno.mkdir(`${PYR_HOME}/cache`, { recursive: true });
-  const tarPath = `${PYR_HOME}/cache/${asset.name}`;
-  const dlResp = await fetch(asset.browser_download_url);
-
-  if (!dlResp.ok || !dlResp.body) {
-    console.error("download failed");
-    Deno.exit(1);
+  // The version stamp alone cannot establish that an interrupted install is
+  // usable. Probe it before skipping a same-version download.
+  if (await managedPythonVersion() === version && await pythonReportsVersion(pythonBin, version)) {
+    return pythonBin;
   }
 
-  const file = await Deno.open(tarPath, {
-    write: true,
-    create: true,
-    truncate: true,
-  });
-  const stream = maybeProgressStream(dlResp);
-  if (stream) {
-    await stream.pipeTo(file.writable);
-  } else {
-    await dlResp.body.pipeTo(file.writable);
-  }
-  // pipeTo closes the WritableStream, but on Windows we've occasionally seen
-  // tar open the file before the handle fully releases. Belt-and-suspenders:
-  // explicitly close and swallow any "already closed" error.
+  // Stage on the same filesystem so promotion and rollback use renames.
+  const work = await Deno.makeTempDir({ dir: PYR_HOME, prefix: ".python-install-" });
+  const staged = `${work}/python`;
+  let preserveWork = false;
   try {
-    file.close();
-  } catch {
-    // already closed by pipeTo
-  }
+    console.log(`downloading cpython ${version}...`);
+    const tarPath = `${work}/python.tar.gz`;
+    const dlResp = await fetch(asset.browser_download_url);
+    if (!dlResp.ok || !dlResp.body) {
+      await dlResp.body?.cancel();
+      throw new Error("download failed; existing python is untouched");
+    }
+    const file = await Deno.open(tarPath, { write: true, createNew: true });
+    try {
+      await (maybeProgressStream(dlResp) ?? dlResp.body).pipeTo(file.writable);
+    } finally {
+      try {
+        file.close();
+      } catch {
+        // pipeTo already closed the handle.
+      }
+    }
 
-  await Deno.mkdir(`${PYR_HOME}/python`, { recursive: true });
+    await Deno.mkdir(staged);
+    const spinner = makeSpinner("extracting...");
+    // MSYS tar misreads native Windows paths. Use Windows' bundled bsdtar.
+    const tarBin = isWindows()
+      ? `${Deno.env.get("SystemRoot") ?? "C:\\Windows"}\\System32\\tar.exe`
+      : "tar";
+    let result: Deno.CommandOutput;
+    try {
+      result = await new Deno.Command(tarBin, {
+        args: ["-xzf", tarPath, "-C", staged, "--strip-components=1"],
+        stderr: "piped",
+        stdout: "piped",
+      }).output();
+    } finally {
+      spinner.stop();
+    }
+    if (!result.success) {
+      throw new Error(
+        `failed to extract python: ${new TextDecoder().decode(result.stderr).trim()}`,
+      );
+    }
 
-  const spinner = makeSpinner("extracting...");
-  // On Windows, spawn the System32 bsdtar explicitly. A plain `tar` on a Git
-  // Bash PATH resolves to MSYS GNU tar (/usr/bin/tar), which (a) mis-parses
-  // `C:\...\foo.tar.gz` as `host:path` and (b) can't chdir into a native
-  // `C:\...` path. System32\tar.exe is libarchive-backed bsdtar, handles
-  // native Windows paths, reads .tar.gz, and ships on every Win10+.
-  const tarBin = isWindows()
-    ? `${Deno.env.get("SystemRoot") ?? "C:\\Windows"}\\System32\\tar.exe`
-    : "tar";
-  const tar = new Deno.Command(tarBin, {
-    args: ["-xzf", tarPath, "-C", `${PYR_HOME}/python`, "--strip-components=1"],
-    stderr: "piped",
-    stdout: "piped",
-  });
-  const result = await tar.output();
-  spinner.stop();
+    const stagedBin = isWindows() ? `${staged}/python.exe` : `${staged}/bin/python3`;
+    if (!await pythonReportsVersion(stagedBin, version)) {
+      throw new Error(`downloaded python failed verification (expected ${version})`);
+    }
+    await Deno.writeTextFile(`${staged}/.version`, version);
 
-  if (!result.success) {
-    const stderr = new TextDecoder().decode(result.stderr).trim();
-    console.error("failed to extract python");
-    if (stderr) console.error(stderr);
-    Deno.exit(1);
-  }
-
-  await Deno.writeTextFile(`${PYR_HOME}/python/.version`, version);
-
-  // Best-effort cleanup of the tarball — keeping it around just bloats the
-  // cache. Failure is non-fatal (e.g., AV scanner holding a lock).
-  try {
-    await Deno.remove(tarPath);
-  } catch {
-    // ignore
+    const live = `${PYR_HOME}/python`;
+    const previous = `${work}/previous`;
+    let hadPrevious = false;
+    try {
+      await Deno.rename(live, previous);
+      hadPrevious = true;
+    } catch (error) {
+      if (!(error instanceof Deno.errors.NotFound)) throw error;
+    }
+    try {
+      await Deno.rename(staged, live);
+    } catch (error) {
+      if (hadPrevious) {
+        try {
+          await Deno.rename(previous, live);
+        } catch (rollbackError) {
+          preserveWork = true;
+          throw new Error(
+            `could not restore python; previous installation retained at ${previous}`,
+            {
+              cause: rollbackError,
+            },
+          );
+        }
+      }
+      throw error;
+    }
+  } finally {
+    if (!preserveWork) await Deno.remove(work, { recursive: true }).catch(() => {});
   }
 
   console.log(`python ${version} ready`);
   return pythonBin;
+}
+
+async function pythonReportsVersion(python: string, expected: string): Promise<boolean> {
+  try {
+    const result = await new Deno.Command(python, {
+      args: [
+        "-I",
+        "-c",
+        "import sys, venv, ensurepip; print('.'.join(map(str, sys.version_info[:3])))",
+      ],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    return result.success && new TextDecoder().decode(result.stdout).trim() === expected;
+  } catch {
+    return false;
+  }
 }
 
 // --- stamps ---
