@@ -71,7 +71,9 @@ jobs:
 
   # PRs must exercise the binary on native Windows runners. The push-only
   # build/smoke matrix below protects main and release artifacts; this job
-  # closes the review-time gap and also runs the installer script on x86_64.
+  # closes the review-time gap and runs the installer on both Windows
+  # architectures. Older releases without the ARM64 ZIP exercise the
+  # installer's explicit x86_64-emulation fallback on the ARM runner.
   windows-native:
     needs: check
     if: github.event_name == 'pull_request' && needs.check.result == 'success'
@@ -83,7 +85,7 @@ jobs:
             installer: true
           - os: windows-11-arm
             target: aarch64-pc-windows-msvc
-            installer: false
+            installer: true
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6

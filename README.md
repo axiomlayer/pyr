@@ -28,7 +28,9 @@ The script installs `pyr` to `~/.pyr/bin/`. Add this to your `PATH`.
 irm https://pyrun.dev/install.ps1 | iex
 ```
 
-Installs `pyr.exe` to `%USERPROFILE%\.pyr\bin\`. Add this to your `PATH`.
+Installs `pyr.exe` to `%USERPROFILE%\.pyr\bin\`. Add this to your `PATH`. On Windows ARM64, the
+installer selects the native ARM64 ZIP when the latest release has one; older releases without that
+asset use the x86_64 ZIP under Windows emulation and print a warning.
 
 Every release publishes a `SHA256SUMS` file next to the zips. The installers resolve one release
 tag, verify the selected ZIP against that manifest, and only then install it; `pyr upgrade` and the

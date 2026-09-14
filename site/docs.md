@@ -36,6 +36,9 @@ irm https://pyrun.dev/install.ps1 | iex
 
 This installs `pyr.exe` into `%USERPROFILE%\.pyr\bin\`. Add that directory to
 your user `PATH` if it isn't already — the installer prints the exact command.
+On Windows ARM64, it uses the native ARM64 ZIP when the latest release has one;
+older releases without that asset fall back to the x86_64 ZIP under Windows
+emulation and print a warning.
 
 Or, manually: download the latest `pyr-windows-x86_64.zip` (or
 `pyr-windows-aarch64.zip` on ARM64) from

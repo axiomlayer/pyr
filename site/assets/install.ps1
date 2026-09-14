@@ -18,16 +18,39 @@ switch ($env:PROCESSOR_ARCHITECTURE) {
     default { Write-Error "unsupported arch: $env:PROCESSOR_ARCHITECTURE"; exit 1 }
 }
 
-$AssetName = "pyr-$target.zip"
+# Windows PowerShell 5.1 does not always negotiate TLS 1.2 by default. Set it
+# before touching GitHub so the one-line installer behaves like PowerShell 7.
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
 $Headers = @{ Accept = "application/vnd.github+json" }
 $Release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers $Headers
 $Tag = [string]$Release.tag_name
 if ($Tag -notmatch '^v[0-9A-Za-z._-]+$') {
     throw "invalid latest release tag"
 }
+$AssetName = "pyr-$target.zip"
+$asset = @($Release.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1)
+if ($asset.Count -eq 0 -and $target -eq "windows-aarch64") {
+    # Older releases predate the native ARM64 artifact. Windows on ARM can
+    # emulate the x86_64 binary, so keep the installer useful until a release
+    # carries the native asset. A release with the native asset always wins.
+    $fallbackTarget = "windows-x86_64"
+    $fallbackName = "pyr-$fallbackTarget.zip"
+    $fallbackAsset = @($Release.assets | Where-Object { $_.name -eq $fallbackName } | Select-Object -First 1)
+    if ($fallbackAsset.Count -eq 0) {
+        throw "latest release $Tag has neither $AssetName nor $fallbackName"
+    }
+    Write-Warning "latest release $Tag has no native Windows ARM64 asset; installing $fallbackName (Windows x86_64 emulation)"
+    $target = $fallbackTarget
+    $AssetName = $fallbackName
+    $asset = $fallbackAsset
+}
+if ($asset.Count -eq 0) {
+    throw "latest release $Tag has no $AssetName asset"
+}
 $BaseUrl = "https://github.com/$Repo/releases/download/$Tag"
 $Url = "$BaseUrl/$AssetName"
-Write-Host "installing pyr..."
+Write-Host "installing pyr ($AssetName)..."
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
 New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
@@ -58,6 +81,9 @@ try {
     }
     $src = Join-Path $tmp "pyr.exe"
     $dst = Join-Path $InstallDir "pyr.exe"
+    if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
+        throw "$AssetName does not contain pyr.exe at its archive root"
+    }
     Move-Item -Path $src -Destination $dst -Force
     Write-Host "installed to $dst"
 
