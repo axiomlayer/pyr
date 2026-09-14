@@ -8,7 +8,9 @@ $ErrorActionPreference = "Stop"
 $Repo = "jasenc7/pyr"
 $PyrHome = if ($env:PYR_HOME) { $env:PYR_HOME } else { Join-Path $env:USERPROFILE ".pyr" }
 $InstallDir = Join-Path $PyrHome "bin"
-$PythonDir  = Join-Path $PyrHome "python\bin"
+# The Windows install_only layout puts python.exe at the root of the managed
+# tree, not under bin\ as on macOS and Linux (see managedPython in lib.ts).
+$PythonDir  = Join-Path $PyrHome "python"
 
 switch ($env:PROCESSOR_ARCHITECTURE) {
     "AMD64" { $target = "windows-x86_64" }
