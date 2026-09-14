@@ -341,10 +341,32 @@ jobs:
           run-id: ${{ steps.find.outputs.run_id }}
           merge-multiple: true
 
+      - name: validate release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=(
+            pyr-darwin-aarch64.zip
+            pyr-darwin-x86_64.zip
+            pyr-linux-aarch64.zip
+            pyr-linux-x86_64.zip
+            pyr-windows-aarch64.zip
+            pyr-windows-x86_64.zip
+          )
+          for archive in "${expected[@]}"; do
+            test -f "$archive"
+          done
+          actual_count=$(find . -maxdepth 1 -type f -name 'pyr-*.zip' | wc -l | tr -d ' ')
+          test "$actual_count" -eq "${#expected[@]}"
+
       # A SHA256SUMS beside the zips lets an installer pin a release by digest
       # instead of trusting whatever "latest" resolves to on the day.
       - name: checksums
-        run: sha256sum *.zip > SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum *.zip > SHA256SUMS
+          sha256sum -c SHA256SUMS
 
       - name: release
         uses: softprops/action-gh-release@v3
