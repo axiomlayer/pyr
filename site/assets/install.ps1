@@ -5,6 +5,16 @@ Installs pyr on Windows.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# Windows PowerShell 5.1 inherits its TLS default from .NET Framework/Schannel
+# system defaults, which on an unpatched or older host can still exclude
+# TLS 1.2. GitHub's API and CDN require it, and the failure mode is a bare
+# "the underlying connection was closed" with no hint that TLS is the cause.
+# CI's windows-latest runner is always current enough not to need this, which
+# is exactly why this can pass there and fail on a real machine. Bitwise-OR
+# in the flag rather than assigning it outright, so an already-correct or
+# broader system setting is preserved.
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
 $Repo = "jasenc7/pyr"
 $PyrHome = if ($env:PYR_HOME) { $env:PYR_HOME } else { Join-Path $env:USERPROFILE ".pyr" }
 $InstallDir = Join-Path $PyrHome "bin"
