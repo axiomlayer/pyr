@@ -1,5 +1,5 @@
 import { assertEquals, assertMatch } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { fromFileUrl } from "https://deno.land/std@0.224.0/path/mod.ts";
+import { fileURLToPath as fromFileUrl } from "node:url";
 import {
   addPyprojectDep,
   basename,
@@ -10,6 +10,7 @@ import {
   managedPython,
   parseRequirementName,
   platformTriple,
+  platformTripleFor,
   protectedInitDir,
   pyproject,
   pyrHome,
@@ -43,6 +44,16 @@ Deno.test("platformTriple returns a valid triple", () => {
     triple,
     /^(aarch64|x86_64)-(apple-darwin|unknown-linux-gnu|pc-windows-msvc)$/,
   );
+});
+
+Deno.test("platformTripleFor rejects unsupported targets without exiting", () => {
+  let message = "";
+  try {
+    platformTripleFor("plan9", "mips64");
+  } catch (error) {
+    message = error instanceof Error ? error.message : String(error);
+  }
+  assertEquals(message, "unsupported platform: plan9-mips64");
 });
 
 Deno.test("pyproject stamp contains project name", () => {
@@ -454,6 +465,22 @@ async function runPyr(
     stderr: new TextDecoder().decode(result.stderr),
   };
 }
+
+Deno.test("handler failures are concise and do not escape as uncaught promises", async () => {
+  const tmp = await Deno.makeTempDir();
+  try {
+    const invalidHome = `${tmp}/not-a-directory`;
+    await Deno.writeTextFile(invalidHome, "file blocks PYR_HOME");
+    const result = await runPyr(tmp, ["upgrade", "--python"], {
+      PYR_HOME: invalidHome,
+    });
+    assertEquals(result.code, 1);
+    assertEquals(result.stderr.includes("Uncaught"), false);
+    assertEquals(result.stderr.trim().length > 0, true);
+  } finally {
+    await Deno.remove(tmp, { recursive: true });
+  }
+});
 
 Deno.test("init refuses non-empty target dir", async () => {
   const tmp = await Deno.makeTempDir();
