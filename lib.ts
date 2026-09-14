@@ -518,6 +518,80 @@ async function write(path: string, content: string) {
   await Deno.writeTextFile(path, content);
 }
 
+interface GithubReleaseAsset {
+  name: string;
+  browser_download_url: string;
+}
+
+/** Parse the conventional sha256sum output emitted beside a release. */
+export function parseSha256Sums(text: string, filename: string): string | null {
+  for (const line of text.split(/\r?\n/)) {
+    const match = line.match(/^\s*([0-9a-fA-F]{64})\s+\*?(\S+)\s*$/);
+    if (match?.[2] === filename) return match[1].toLowerCase();
+  }
+  return null;
+}
+
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const input = new Uint8Array(bytes.byteLength);
+  input.set(bytes);
+  const digest = await crypto.subtle.digest("SHA-256", input.buffer);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function sha256File(path: string): Promise<string> {
+  return await sha256Hex(await Deno.readFile(path));
+}
+
+async function verifySha256File(path: string, expected: string, label: string): Promise<void> {
+  if (!/^[0-9a-fA-F]{64}$/.test(expected)) {
+    throw new Error(`invalid SHA-256 digest for ${label}`);
+  }
+  const actual = await sha256File(path);
+  if (actual !== expected.toLowerCase()) {
+    throw new Error(`SHA-256 mismatch for ${label}`);
+  }
+}
+
+async function releaseAssetSha256(
+  release: { assets?: GithubReleaseAsset[] },
+  filename: string,
+): Promise<string> {
+  const sumsAsset = release.assets?.find((asset) => asset.name === "SHA256SUMS");
+  if (!sumsAsset) {
+    throw new Error(`release has no SHA256SUMS; refusing to download ${filename}`);
+  }
+
+  const response = await fetch(sumsAsset.browser_download_url);
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`failed to download SHA256SUMS: ${response.status}`);
+  }
+  const digest = parseSha256Sums(await response.text(), filename);
+  if (!digest) {
+    throw new Error(`SHA256SUMS has no valid entry for ${filename}`);
+  }
+  return digest;
+}
+
+async function downloadFile(url: string, path: string, failure: string): Promise<void> {
+  const response = await fetch(url);
+  if (!response.ok || !response.body) {
+    await response.body?.cancel();
+    throw new Error(failure);
+  }
+  const file = await Deno.open(path, { write: true, createNew: true });
+  try {
+    await (maybeProgressStream(response) ?? response.body).pipeTo(file.writable);
+  } finally {
+    try {
+      file.close();
+    } catch {
+      // pipeTo already closed the handle.
+    }
+  }
+}
+
 function githubHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     Accept: "application/vnd.github.v3+json",
@@ -1002,7 +1076,10 @@ async function upgradeSelf() {
     Deno.exit(1);
   }
 
-  const release = await resp.json();
+  const release = await resp.json() as {
+    tag_name: string;
+    assets: GithubReleaseAsset[];
+  };
   const latest = release.tag_name.replace(/^v/, "");
 
   if (latest === PYR_VERSION) {
@@ -1016,6 +1093,7 @@ async function upgradeSelf() {
     console.error(`no binary found for ${expected}`);
     Deno.exit(1);
   }
+  const expectedSha256 = await releaseAssetSha256(release, expected);
 
   console.log(`updating ${PYR_VERSION} -> ${latest}...`);
 
@@ -1024,26 +1102,8 @@ async function upgradeSelf() {
   const work = await Deno.makeTempDir({ prefix: "pyr-upgrade-" });
   const zipPath = `${work}/pyr.zip`;
   try {
-    const dlResp = await fetch(asset.browser_download_url);
-    if (!dlResp.ok || !dlResp.body) {
-      console.error("download failed");
-      Deno.exit(1);
-    }
-    const file = await Deno.open(zipPath, { write: true, create: true, truncate: true });
-    const stream = maybeProgressStream(dlResp);
-    if (stream) {
-      await stream.pipeTo(file.writable);
-    } else {
-      await dlResp.body.pipeTo(file.writable);
-    }
-    // See extractPython: pipeTo closes the stream but Windows can lag on the
-    // underlying handle release. Close explicitly before anything reads the
-    // file.
-    try {
-      file.close();
-    } catch {
-      // already closed by pipeTo
-    }
+    await downloadFile(asset.browser_download_url, zipPath, "download failed");
+    await verifySha256File(zipPath, expectedSha256, expected);
 
     // Extract. unzip is standard on macOS/Linux. On Windows we use
     // PowerShell's Expand-Archive rather than `tar` — `tar` on a Git Bash
@@ -1225,7 +1285,7 @@ async function installPythonLocked(triple: string): Promise<string> {
     throw new Error(`github api error: ${resp.status}; existing python is untouched`);
   }
 
-  const release = await resp.json();
+  const release = await resp.json() as { assets: GithubReleaseAsset[] };
 
   const pattern = new RegExp(
     `cpython-(\\d+\\.\\d+\\.\\d+)\\+\\d+-${triple}-install_only\\.tar\\.gz$`,
@@ -1251,6 +1311,7 @@ async function installPythonLocked(triple: string): Promise<string> {
   if (await managedPythonVersion() === version && await pythonReportsVersion(pythonBin, version)) {
     return pythonBin;
   }
+  const expectedSha256 = await releaseAssetSha256(release, asset.name);
 
   // Stage on the same filesystem so promotion and rollback use renames.
   const work = await Deno.makeTempDir({ dir: PYR_HOME, prefix: ".python-install-" });
@@ -1259,21 +1320,12 @@ async function installPythonLocked(triple: string): Promise<string> {
   try {
     console.log(`downloading cpython ${version}...`);
     const tarPath = `${work}/python.tar.gz`;
-    const dlResp = await fetch(asset.browser_download_url);
-    if (!dlResp.ok || !dlResp.body) {
-      await dlResp.body?.cancel();
-      throw new Error("download failed; existing python is untouched");
-    }
-    const file = await Deno.open(tarPath, { write: true, createNew: true });
-    try {
-      await (maybeProgressStream(dlResp) ?? dlResp.body).pipeTo(file.writable);
-    } finally {
-      try {
-        file.close();
-      } catch {
-        // pipeTo already closed the handle.
-      }
-    }
+    await downloadFile(
+      asset.browser_download_url,
+      tarPath,
+      "download failed; existing python is untouched",
+    );
+    await verifySha256File(tarPath, expectedSha256, asset.name);
 
     await Deno.mkdir(staged);
     const spinner = makeSpinner("extracting...");

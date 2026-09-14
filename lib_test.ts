@@ -9,6 +9,7 @@ import {
   isWindows,
   managedPython,
   parseRequirementName,
+  parseSha256Sums,
   platformTriple,
   platformTripleFor,
   protectedInitDir,
@@ -17,6 +18,7 @@ import {
   readLock,
   readPyprojectDeps,
   removePyprojectDep,
+  sha256Hex,
   stamp,
   sync,
   venvPaths,
@@ -24,6 +26,30 @@ import {
 } from "./lib.ts";
 
 // --- unit tests ---
+
+Deno.test("release checksum parsing matches exact assets", () => {
+  const digest = "a".repeat(64);
+  assertEquals(
+    parseSha256Sums(`${digest}  pyr-linux-x86_64.zip\n`, "pyr-linux-x86_64.zip"),
+    digest,
+  );
+  assertEquals(
+    parseSha256Sums(`${digest} *pyr-linux-x86_64.zip\n`, "pyr-linux-x86_64.zip"),
+    digest,
+  );
+  assertEquals(parseSha256Sums(`${digest}  other.zip\n`, "pyr-linux-x86_64.zip"), null);
+  assertEquals(
+    parseSha256Sums(`not-a-digest  pyr-linux-x86_64.zip\n`, "pyr-linux-x86_64.zip"),
+    null,
+  );
+});
+
+Deno.test("sha256Hex hashes downloaded bytes", async () => {
+  assertEquals(
+    await sha256Hex(new TextEncoder().encode("hello")),
+    "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+  );
+});
 
 Deno.test("basename extracts last segment", () => {
   assertEquals(basename("/foo/bar/baz"), "baz");

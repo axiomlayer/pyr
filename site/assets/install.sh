@@ -1,5 +1,5 @@
 #!/bin/sh
-set -euo pipefail
+set -eu
 
 REPO="jasenc7/pyr"
 INSTALL_DIR="${PYR_HOME:-$HOME/.pyr}/bin"
@@ -24,14 +24,54 @@ main() {
   esac
 
   target="${os}-${arch}"
-  url="https://github.com/${REPO}/releases/latest/download/pyr-${target}.zip"
+  asset_name="pyr-${target}.zip"
+
+  # Resolve one immutable release tag before fetching either the checksum
+  # manifest or the archive. Fetching two independent `latest` URLs would
+  # allow a release rollover between the requests.
+  release_json=$(curl -fsSL \
+    -H 'Accept: application/vnd.github+json' \
+    "https://api.github.com/repos/${REPO}/releases/latest")
+  tag=$(printf '%s\n' "$release_json" |
+    sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+    head -n 1)
+  case "$tag" in
+    v[0-9A-Za-z._-]*) ;;
+    *) echo "invalid latest release tag"; exit 1 ;;
+  esac
+
+  base_url="https://github.com/${REPO}/releases/download/${tag}"
+  url="${base_url}/${asset_name}"
 
   echo "installing pyr..."
 
   tmpdir=$(mktemp -d)
   trap 'rm -rf "$tmpdir"' EXIT
 
-  curl -fsSL "$url" -o "$tmpdir/pyr.zip"
+  curl -fsSL "${base_url}/SHA256SUMS" -o "$tmpdir/SHA256SUMS"
+  expected=$(awk -v name="$asset_name" \
+    '$2 == name || $2 == "*" name { print $1; exit }' "$tmpdir/SHA256SUMS")
+  if [ -z "$expected" ] || ! printf '%s\n' "$expected" | grep -Eq '^[0-9A-Fa-f]{64}$'; then
+    echo "SHA256SUMS has no valid entry for ${asset_name}"
+    exit 1
+  fi
+
+  curl -fsSL "$url" -o "$tmpdir/$asset_name"
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual=$(sha256sum "$tmpdir/$asset_name" | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    actual=$(shasum -a 256 "$tmpdir/$asset_name" | awk '{print $1}')
+  else
+    echo "sha256sum or shasum is required"
+    exit 1
+  fi
+  expected=$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')
+  if [ "$actual" != "$expected" ]; then
+    echo "SHA-256 mismatch for ${asset_name}"
+    exit 1
+  fi
+
+  mv "$tmpdir/$asset_name" "$tmpdir/pyr.zip"
   unzip -qo "$tmpdir/pyr.zip" -d "$tmpdir"
 
   mkdir -p "$INSTALL_DIR"
