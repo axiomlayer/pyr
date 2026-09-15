@@ -922,3 +922,116 @@ Deno.test("extras, markers and comments survive the read", async () => {
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+// --- pyproject dependency reads: structure, not content ---
+//
+// Each case below is a real finding from review round two on this change.
+// Broadening the matchers made a new class of false positive reachable: text
+// that looks like a table or a key but is the inside of a value.
+
+Deno.test("a table or key spelled inside a string is not one", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = `${dir}/pyproject.toml`;
+  try {
+    // A [tool.*] multi-line value that contains a plausible header and key
+    // BEFORE the real [project]. Read as structure this installs
+    // fake-package and prunes the genuine dependency as an orphan.
+    await Deno.writeTextFile(
+      path,
+      [
+        "[tool.example]",
+        'notes = """',
+        '[ "project" ]',
+        'dependencies = ["fake-package"]',
+        '"""',
+        "",
+        "[project]",
+        'dependencies = ["requests"]',
+        "",
+      ].join("\n"),
+    );
+    assertEquals(await readPyprojectDeps(path), ["requests"]);
+
+    // Same shape, but the decoy sits inside [project]'s own description.
+    await Deno.writeTextFile(
+      path,
+      [
+        "[project]",
+        'description = """',
+        "[nope]",
+        'dependencies = ["fake"]',
+        '"""',
+        'dependencies = ["requests"]',
+        "",
+      ].join("\n"),
+    );
+    assertEquals(await readPyprojectDeps(path), ["requests"]);
+
+    // A commented-out key must not answer, and a # inside a string value must
+    // not be mistaken for the start of a comment.
+    await Deno.writeTextFile(
+      path,
+      '[project]\n# dependencies = ["fake"]\nname = "a # b"\ndependencies = ["requests"]\n',
+    );
+    assertEquals(await readPyprojectDeps(path), ["requests"]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("an unrelated dependencies key does not block a sync", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = `${dir}/pyproject.toml`;
+  try {
+    // [project] legitimately has no dependencies and hatch has its own key.
+    // Reporting indeterminate here would refuse a sync that is fully
+    // understood, so this must read as absent.
+    await Deno.writeTextFile(
+      path,
+      '[project]\nname = "x"\n\n[tool.hatch.envs.test]\ndependencies = ["pytest"]\n',
+    );
+    assertEquals((await readPyprojectDepsDetailed(path)).kind, "absent");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("project shapes this reader cannot resolve are indeterminate", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = `${dir}/pyproject.toml`;
+  try {
+    // A valid inline table. tomllib reads ["requests"] here; the locators
+    // cannot see inside it, so the only safe answer is indeterminate.
+    await Deno.writeTextFile(
+      path,
+      'project = { name = "x", dependencies = ["requests"] }\n',
+    );
+    assertEquals((await readPyprojectDepsDetailed(path)).kind, "indeterminate");
+
+    // dynamic reached through a dotted key rather than a [project] table.
+    await Deno.writeTextFile(path, 'project.dynamic = ["dependencies"]\n');
+    assertEquals((await readPyprojectDepsDetailed(path)).kind, "indeterminate");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("only a missing file is absent; other read failures are not", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    // Genuinely missing: absent, and pruning against that is correct.
+    assertEquals(
+      (await readPyprojectDepsDetailed(`${dir}/pyproject.toml`)).kind,
+      "absent",
+    );
+
+    // Present but unreadable. A directory at the path stands in for the real
+    // cases: a permission error, a transient I/O failure, a Windows lock.
+    // None of them says anything about the contents.
+    await Deno.mkdir(`${dir}/asdir/pyproject.toml`, { recursive: true });
+    const read = await readPyprojectDepsDetailed(`${dir}/asdir/pyproject.toml`);
+    assertEquals(read.kind, "indeterminate");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
