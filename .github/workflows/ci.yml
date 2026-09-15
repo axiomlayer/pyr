@@ -4,8 +4,13 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # Every pull request, whatever it targets. Filtering this to main meant a
+  # stacked PR ran no jobs at all, and GitHub reports "no checks" the same
+  # way it reports a clean run: as nothing red. #40 carried the fix for a
+  # bug that recursively uninstalls a venv and had zero check runs on it.
+  # build, smoke and release are unaffected; they already exclude pull
+  # requests or run only on tags.
   pull_request:
-    branches: [main]
 
 # Coalesce re-pushes to the same ref. Main and tag pushes live in different
 # groups (different refs) so they both still run, but spamming a branch with
