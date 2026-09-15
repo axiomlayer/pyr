@@ -12,19 +12,21 @@ release. It records four distinct things that the release's own `SHA256SUMS` can
 The scheduled `release-integrity` workflow resolves only the exact tag and exact asset URLs in this
 file. It never resolves `latest`, downloads anonymously, bounds every response, permits only
 GitHub's single release-CDN redirect, rejects a changed or missing release, and re-measures both
-layers. GitHub-hosted Linux and macOS runners execute all four matching Unix binaries. A separate
-workflow with no pull-request trigger executes the pinned Windows ARM64 PE on Ocelot and the x86_64
-PE on Siberian, then proves each host refuses the opposite architecture before execution.
+layers. GitHub-hosted Linux, macOS, and Windows runners execute all six matching binaries on their
+native CPU architectures. A separate workflow with no pull-request trigger repeats the Windows proof
+on Ocelot and Siberian, then proves each host refuses the opposite architecture before execution.
 
-The two Windows runners must belong to the non-default `fleet-trusted` runner group. Restrict that
-group to this workflow at the fully qualified `refs/heads/main` ref; labels route to Ocelot or
-Siberian but are not an authorization boundary. When the repository moves from `jasenc7` to
-`axiomlayer`, update that selected-workflow owner atomically with the move.
+The two fleet Windows runners must belong to the non-default `fleet-trusted` runner group. Restrict
+that group to this workflow at the fully qualified `refs/heads/main` ref; labels route to Ocelot or
+Siberian but are not an authorization boundary. If the group is absent or not authorized for this
+repository, GitHub refuses both jobs before any step runs. The hosted Windows matrix remains the
+portable release gate; the fleet workflow is the additional physical-device acceptance layer.
 
-This manifest is source evidence, not a fleet distribution endpoint. `jasenc7/pyr` remains the
-current publisher. The ownership fields reserve AxiomLayer as the promotion boundary without
-inventing a mirror URL that does not yet exist; fleet consumers must wait for an independently
-published and pinned AxiomLayer promotion manifest.
+This manifest is source evidence, not a mutable fleet distribution endpoint. `axiomlayer/pyr` is the
+current publisher and the promotion boundary. The repository transfer preserved the release, tag,
+asset IDs, and bytes; the canonical URLs changed and are pinned here so verification never depends
+on GitHub's old-owner redirect. Fleet consumers should copy reviewed exact-tag archive and
+executable pins into their own capability manifests rather than resolve this file during bootstrap.
 
 ## Updating the pin
 

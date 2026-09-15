@@ -71,7 +71,7 @@ export default function App({ Component, url }: PageProps) {
             )}
             <a
               class="nav-link"
-              href="https://github.com/jasenc7/pyr"
+              href="https://github.com/axiomlayer/pyr"
               target="_blank"
               rel="noopener"
             >

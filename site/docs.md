@@ -52,7 +52,7 @@ explicit Windows-native `PYR_HOME` to override it.
 
 Or, manually: download the latest `pyr-windows-x86_64.zip` (or
 `pyr-windows-aarch64.zip` on ARM64) from
-[releases](https://github.com/jasenc7/pyr/releases/latest), unzip it, and put
+[releases](https://github.com/axiomlayer/pyr/releases/latest), unzip it, and put
 `pyr.exe` somewhere on your `PATH`.
 
 `PYR_HOME` overrides where pyr keeps its state and binary; defaults to `~/.pyr`

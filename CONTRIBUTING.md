@@ -7,7 +7,7 @@ for Python projects.
 
 ## **Reporting Bugs**
 
-Open an [issue](https://github.com/jasenc7/pyr/issues) with:
+Open an [issue](https://github.com/axiomlayer/pyr/issues) with:
 
 - Steps to reproduce.
 - Expected/actual behavior.
@@ -17,8 +17,8 @@ Open an [issue](https://github.com/jasenc7/pyr/issues) with:
 
 ## **Suggesting Features**
 
-Open a [Discussion](https://github.com/jasenc7/pyr/discussions) first. pyr’s scope is intentionally
-narrow:
+Open a [Discussion](https://github.com/axiomlayer/pyr/discussions) first. pyr’s scope is
+intentionally narrow:
 
 - Does it reduce ceremony for Python projects?
 - Would it make sense for `pip` or `venv` to do this?\
@@ -55,7 +55,7 @@ deno run test
 ## **Development Setup**
 
 ```sh
-git clone https://github.com/jasenc7/pyr.git
+git clone https://github.com/axiomlayer/pyr.git
 cd pyr
 deno fmt
 deno lint

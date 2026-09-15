@@ -42,8 +42,8 @@ Add any other context about the problem here (e.g., logs, screenshots).
 
 ---
 
-**Note:** For issues, open an [Issue](https://github.com/jasenc7/pyr/issues). For feature requests,
-use [Discussions](https://github.com/jasenc7/pyr/discussions).
+**Note:** For issues, open an [Issue](https://github.com/axiomlayer/pyr/issues). For feature
+requests, use [Discussions](https://github.com/axiomlayer/pyr/discussions).
 
 ## name: Question or Support
 
@@ -74,7 +74,7 @@ Describe what you’re trying to do and what’s happening.
 
 - **Bugs:** If this is a bug, we’ll convert it to an issue.
 - **Features:** If this is a feature request, we’ll move it to
-  [Discussions](https://github.com/jasenc7/pyr/discussions).
+  [Discussions](https://github.com/axiomlayer/pyr/discussions).
 - **Questions:** We’ll answer here or redirect to Discussions for broader conversation.
 
 ---

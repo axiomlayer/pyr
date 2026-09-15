@@ -79,6 +79,12 @@ jobs:
           - runner: macos-15
             asset: darwin-aarch64
             architecture: aarch64
+          - runner: windows-latest
+            asset: windows-x86_64
+            architecture: x86_64
+          - runner: windows-11-arm
+            asset: windows-aarch64
+            architecture: aarch64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
@@ -89,6 +95,7 @@ jobs:
         with:
           deno-version: v2.9.5
       - name: download and verify the matching pinned native asset
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -101,6 +108,8 @@ jobs:
             --asset ${{ matrix.asset }} \
             --output-dir .verified
       - name: execute on the hosted native architecture
+        if: runner.os != 'Windows'
+        shell: bash
         run: |
           set -euo pipefail
           actual_arch=$(uname -m)
@@ -116,6 +125,14 @@ jobs:
           expected=$(deno eval 'console.log(JSON.parse(Deno.readTextFileSync("release/pyr-v0.1.1.json")).release.version)')
           test "$(.verified/pyr --version)" = "$expected"
           .verified/pyr --help | grep -q 'usage: pyr'
+      - name: execute on the hosted native Windows architecture
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\scripts\verify-native-windows.ps1 `
+            -Architecture '${{ matrix.architecture }}' `
+            -Binary '.verified\pyr.exe' `
+            -Manifest 'release\pyr-v0.1.1.json'
 
   verify:
     if: always()

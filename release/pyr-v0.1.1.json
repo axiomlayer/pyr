@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "release": {
-    "repository": "jasenc7/pyr",
+    "repository": "axiomlayer/pyr",
     "releaseId": 388768465,
     "tag": "v0.1.1",
     "version": "0.1.1",
@@ -10,14 +10,14 @@
     "publishedAt": "2026-09-14T23:18:47Z"
   },
   "ownership": {
-    "currentOwner": "jasenc7",
+    "currentOwner": "axiomlayer",
     "promotionTargetOwner": "axiomlayer",
     "fleetConsumption": "source-evidence-only"
   },
   "checksumManifest": {
     "name": "SHA256SUMS",
     "releaseAssetId": 564429612,
-    "url": "https://github.com/jasenc7/pyr/releases/download/v0.1.1/SHA256SUMS",
+    "url": "https://github.com/axiomlayer/pyr/releases/download/v0.1.1/SHA256SUMS",
     "size": 531,
     "sha256": "077056e1a0d7a07048d1773d62cc4a660fc846168bedd7af855d1c71a38a6f55"
   },
@@ -28,7 +28,7 @@
       "architecture": "aarch64",
       "releaseAssetId": 564429616,
       "name": "pyr-darwin-aarch64.zip",
-      "url": "https://github.com/jasenc7/pyr/releases/download/v0.1.1/pyr-darwin-aarch64.zip",
+      "url": "https://github.com/axiomlayer/pyr/releases/download/v0.1.1/pyr-darwin-aarch64.zip",
       "archive": {
         "size": 28796161,
         "sha256": "9e27afcc86b29efdf4a019b5fbef4a8c65600028041db62b6e32ea4f19d69948"
@@ -46,7 +46,7 @@
       "architecture": "x86_64",
       "releaseAssetId": 564429617,
       "name": "pyr-darwin-x86_64.zip",
-      "url": "https://github.com/jasenc7/pyr/releases/download/v0.1.1/pyr-darwin-x86_64.zip",
+      "url": "https://github.com/axiomlayer/pyr/releases/download/v0.1.1/pyr-darwin-x86_64.zip",
       "archive": {
         "size": 32268399,
         "sha256": "4dce2d0d39567472e8524e016c8a970a4202ec7e7cf38e6405829a1e95857836"
@@ -64,7 +64,7 @@
       "architecture": "aarch64",
       "releaseAssetId": 564429615,
       "name": "pyr-linux-aarch64.zip",
-      "url": "https://github.com/jasenc7/pyr/releases/download/v0.1.1/pyr-linux-aarch64.zip",
+      "url": "https://github.com/axiomlayer/pyr/releases/download/v0.1.1/pyr-linux-aarch64.zip",
       "archive": {
         "size": 34310537,
         "sha256": "ef45eea0e60597acdd115d55b52538d33a0fd8866fd60626a399a9a7ac1774d7"
@@ -82,7 +82,7 @@
       "architecture": "x86_64",
       "releaseAssetId": 564429614,
       "name": "pyr-linux-x86_64.zip",
-      "url": "https://github.com/jasenc7/pyr/releases/download/v0.1.1/pyr-linux-x86_64.zip",
+      "url": "https://github.com/axiomlayer/pyr/releases/download/v0.1.1/pyr-linux-x86_64.zip",
       "archive": {
         "size": 34467662,
         "sha256": "079401749e96a4634c62cc7d510fc4f0165256d53326626c74427f0d44671d91"
@@ -100,7 +100,7 @@
       "architecture": "aarch64",
       "releaseAssetId": 564429613,
       "name": "pyr-windows-aarch64.zip",
-      "url": "https://github.com/jasenc7/pyr/releases/download/v0.1.1/pyr-windows-aarch64.zip",
+      "url": "https://github.com/axiomlayer/pyr/releases/download/v0.1.1/pyr-windows-aarch64.zip",
       "archive": {
         "size": 31260364,
         "sha256": "280cf969731092c95387da2fe43ee607131d381bd53302f08986271b3b6287cf"
@@ -118,7 +118,7 @@
       "architecture": "x86_64",
       "releaseAssetId": 564429611,
       "name": "pyr-windows-x86_64.zip",
-      "url": "https://github.com/jasenc7/pyr/releases/download/v0.1.1/pyr-windows-x86_64.zip",
+      "url": "https://github.com/axiomlayer/pyr/releases/download/v0.1.1/pyr-windows-x86_64.zip",
       "archive": {
         "size": 32741487,
         "sha256": "2fa50b0abf56b5e539537898ec9b70e69dc483a924378826312f6cb7529a3950"
