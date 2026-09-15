@@ -1,0 +1,69 @@
+name: Codex hold
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  issues: read
+  pull-requests: read
+
+jobs:
+  hold:
+    name: hold
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71 # v9.0.0
+        with:
+          script: |
+            if (!['opened', 'reopened'].includes(context.payload.action)) {
+              core.info('Not a PR open, Codex reviews on open only. Releasing.');
+              return;
+            }
+
+            const owner = context.repo.owner, repo = context.repo.repo;
+            const n = context.payload.pull_request.number;
+            const BOTS = new Set(['chatgpt-codex-connector[bot]']);
+            const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+            await sleep(60000);
+            const deadline = Date.now() + 25 * 60 * 1000;
+            let sawEyes = false;
+
+            while (true) {
+              const reactions = await github.paginate(
+                github.rest.reactions.listForIssue,
+                { owner, repo, issue_number: n, per_page: 100 });
+              const byBot = reactions.filter(r => BOTS.has(r.user?.login));
+
+              if (byBot.some(r => r.content === '+1')) {
+                core.info('Codex cleared this PR (👍). Releasing hold.');
+                return;
+              }
+
+              const [issueComments, reviewComments, reviews] = await Promise.all([
+                github.paginate(github.rest.issues.listComments,
+                  { owner, repo, issue_number: n, per_page: 100 }),
+                github.paginate(github.rest.pulls.listReviewComments,
+                  { owner, repo, pull_number: n, per_page: 100 }),
+                github.paginate(github.rest.pulls.listReviews,
+                  { owner, repo, pull_number: n, per_page: 100 }),
+              ]);
+              if ([...issueComments, ...reviewComments, ...reviews]
+                    .some(c => BOTS.has(c.user?.login))) {
+                core.info('Codex left feedback. Releasing hold, thread resolution now gates.');
+                return;
+              }
+
+              if (byBot.some(r => r.content === 'eyes')) sawEyes = true;
+              if (!sawEyes) {
+                core.info('No 👀 from Codex, not watching this PR. Releasing hold.');
+                return;
+              }
+              if (Date.now() > deadline) {
+                core.warning('Codex acknowledged (👀) but returned no verdict in 25 minutes. Releasing, review capacity may be exhausted.');
+                return;
+              }
+              await sleep(30000);
+            }
