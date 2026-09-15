@@ -359,6 +359,34 @@ Deno.test("Python installation preserves the live runtime until replacement is v
       assertStringIncludes(error.message, "wait at least a minute");
       await assertPreserved();
     });
+    await t.step("a bare 429 is throttling even with no headers", async () => {
+      await reset();
+      releaseResponse = () => new Response("", { status: 429 });
+      const error = await assertRejects(() => upgrade(["--python"]), Error);
+      assertStringIncludes(error.message, "HTTP 429 with no rate limit headers");
+      await assertPreserved();
+    });
+    // An error body of unexpected size must not be buffered whole just to
+    // look for a phrase in its first few hundred bytes. This stream never
+    // ends, so reading it fully would not return at all, and each chunk is
+    // deliberately far larger than the read limit: keeping a whole chunk, or
+    // a view onto one, would leave the oversized buffer reachable and bound
+    // nothing.
+    await t.step("an endless error body does not stall the failure path", async () => {
+      await reset();
+      releaseResponse = () =>
+        new Response(
+          new ReadableStream({
+            pull(controller) {
+              controller.enqueue(new Uint8Array(50_000).fill(120));
+            },
+          }),
+          { status: 403, headers: { "x-ratelimit-remaining": "4999" } },
+        );
+      const error = await assertRejects(() => upgrade(["--python"]), Error);
+      assertStringIncludes(error.message, "github api error: 403");
+      await assertPreserved();
+    });
     await t.step("a 403 that is not a rate limit does not blame the token", async () => {
       await reset();
       releaseResponse = () =>

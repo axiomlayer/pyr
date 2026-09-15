@@ -1,0 +1,117 @@
+name: release-integrity-native-windows
+
+# This file deliberately has no pull_request, pull_request_target, workflow_run,
+# or workflow_call trigger. Persistent fleet runners execute only code that is
+# already on the trusted main ref; pull requests stay on GitHub-hosted runners
+# in release-integrity.yml.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "41 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native-windows-release:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: ocelot
+            architecture: aarch64
+            runner_architecture: ARM64
+            opposite_architecture: x86_64
+          - host: siberian
+            architecture: x86_64
+            runner_architecture: X64
+            opposite_architecture: aarch64
+    runs-on:
+      group: fleet-trusted
+      labels:
+        - self-hosted
+        - fleet
+        - trusted
+        - Windows
+        - pyr-release-integrity
+        - ${{ matrix.host }}
+        - ${{ matrix.runner_architecture }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          clean: true
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: bind the checkout to trusted main
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ('${{ github.ref }}' -ne 'refs/heads/main') { throw 'self-hosted acceptance requires refs/heads/main' }
+          if ('${{ github.event_name }}' -notin @('push', 'schedule', 'workflow_dispatch')) {
+            throw 'untrusted event cannot use a fleet runner'
+          }
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -ne '${{ github.sha }}') { throw "checkout $head does not match workflow SHA" }
+      - name: require the fleet-pinned Deno runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = (deno --version | Select-Object -First 1).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'deno --version failed' }
+          if ($version -ne 'deno 2.9.5') { throw "expected deno 2.9.5, got $version" }
+      - name: download and verify the matching native PE
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          deno run `
+            --allow-net=api.github.com,github.com,release-assets.githubusercontent.com `
+            --allow-env=GITHUB_TOKEN `
+            --allow-read `
+            --allow-write `
+            scripts/verify-release-integrity.ts `
+            --asset windows-${{ matrix.architecture }} `
+            --output-dir .verified
+      - name: execute only the matching PE on the matching host
+        shell: pwsh
+        run: |
+          .\scripts\verify-native-windows.ps1 `
+            -Architecture '${{ matrix.architecture }}' `
+            -Binary '.verified\pyr.exe' `
+            -Manifest 'release\pyr-v0.1.1.json'
+      - name: prove the opposite Windows architecture is refused before execution
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          deno run `
+            --allow-net=api.github.com,github.com,release-assets.githubusercontent.com `
+            --allow-env=GITHUB_TOKEN `
+            --allow-read `
+            --allow-write `
+            scripts/verify-release-integrity.ts `
+            --asset windows-${{ matrix.opposite_architecture }} `
+            --output-dir .verified-opposite
+          if ($LASTEXITCODE -ne 0) { throw 'opposite-architecture download verification failed' }
+          try {
+            .\scripts\verify-native-windows.ps1 `
+              -Architecture '${{ matrix.architecture }}' `
+              -Binary '.verified-opposite\pyr.exe' `
+              -Manifest 'release\pyr-v0.1.1.json'
+          } catch {
+            if ($_.Exception.Message -notmatch 'PE machine is') { throw }
+            Write-Host "refused opposite-architecture PE: $($_.Exception.Message)"
+            exit 0
+          }
+          throw 'opposite-architecture PE was accepted'

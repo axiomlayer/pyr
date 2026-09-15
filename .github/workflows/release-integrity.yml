@@ -1,0 +1,133 @@
+name: release-integrity
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  manifest-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.9.5
+      - name: format
+        run: |
+          deno fmt --check \
+            release/pyr-v0.1.1.json \
+            release/README.md \
+            release_integrity_test.ts \
+            scripts/verify-release-integrity.ts
+      - name: lint and type check
+        run: |
+          deno lint release_integrity_test.ts scripts/verify-release-integrity.ts
+          deno check release_integrity_test.ts scripts/verify-release-integrity.ts
+      - name: tamper-negative tests
+        run: deno test --allow-read release_integrity_test.ts
+
+  published-assets:
+    needs: manifest-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.9.5
+      - name: verify every published release asset
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          deno run \
+            --allow-net=api.github.com,github.com,release-assets.githubusercontent.com \
+            --allow-env=GITHUB_TOKEN \
+            --allow-read \
+            scripts/verify-release-integrity.ts
+
+  hosted-native-release:
+    needs: manifest-tests
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            asset: linux-x86_64
+            architecture: x86_64
+          - runner: ubuntu-24.04-arm
+            asset: linux-aarch64
+            architecture: aarch64
+          - runner: macos-15-intel
+            asset: darwin-x86_64
+            architecture: x86_64
+          - runner: macos-15
+            asset: darwin-aarch64
+            architecture: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.9.5
+      - name: download and verify the matching pinned native asset
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          deno run \
+            --allow-net=api.github.com,github.com,release-assets.githubusercontent.com \
+            --allow-env=GITHUB_TOKEN \
+            --allow-read \
+            --allow-write \
+            scripts/verify-release-integrity.ts \
+            --asset ${{ matrix.asset }} \
+            --output-dir .verified
+      - name: execute on the hosted native architecture
+        run: |
+          set -euo pipefail
+          actual_arch=$(uname -m)
+          case '${{ matrix.architecture }}' in
+            x86_64) test "$actual_arch" = x86_64 ;;
+            aarch64)
+              case "$actual_arch" in
+                arm64|aarch64) ;;
+                *) exit 1 ;;
+              esac
+              ;;
+          esac
+          expected=$(deno eval 'console.log(JSON.parse(Deno.readTextFileSync("release/pyr-v0.1.1.json")).release.version)')
+          test "$(.verified/pyr --version)" = "$expected"
+          .verified/pyr --help | grep -q 'usage: pyr'
+
+  verify:
+    if: always()
+    needs: [manifest-tests, published-assets, hosted-native-release]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: require the complete release proof
+        env:
+          MANIFEST_TESTS: ${{ needs.manifest-tests.result }}
+          PUBLISHED_ASSETS: ${{ needs.published-assets.result }}
+          HOSTED_NATIVE_RELEASE: ${{ needs.hosted-native-release.result }}
+        run: |
+          test "$MANIFEST_TESTS" = success
+          test "$PUBLISHED_ASSETS" = success
+          test "$HOSTED_NATIVE_RELEASE" = success

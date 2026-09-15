@@ -80,6 +80,21 @@ deno compile --target aarch64-unknown-linux-gnu main.ts
 deno compile --target x86_64-apple-darwin main.ts
 ```
 
+### **Verify a Published Release**
+
+The release sidecar uses an exact-tag manifest and anonymous public downloads; it does not consume a
+GitHub token or repository secret:
+
+```sh
+deno test --allow-read release_integrity_test.ts
+deno run \
+  --allow-net=api.github.com,github.com,release-assets.githubusercontent.com \
+  --allow-read \
+  scripts/verify-release-integrity.ts
+```
+
+See [`release/README.md`](./release/README.md) before changing a published-release pin.
+
 ### **Site Development**
 
 ```sh
