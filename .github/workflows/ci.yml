@@ -4,8 +4,12 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # Deliberately unfiltered by base branch. A stacked pull request targets the
+  # branch below it rather than main, and a branches filter matches the BASE,
+  # so gating on main means every stacked PR arrives with zero checks: that is
+  # how pyr#40, the fix for sync uninstalling the whole tree, reached review
+  # ungated and had to be re-pointed at main to get one.
   pull_request:
-    branches: [main]
 
 # Coalesce re-pushes to the same ref. Main and tag pushes live in different
 # groups (different refs) so they both still run, but spamming a branch with
