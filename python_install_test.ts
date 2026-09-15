@@ -367,15 +367,18 @@ Deno.test("Python installation preserves the live runtime until replacement is v
       await assertPreserved();
     });
     // An error body of unexpected size must not be buffered whole just to
-    // look for a phrase in its first few hundred bytes. The stream here never
-    // ends, so reading it fully would not return at all.
+    // look for a phrase in its first few hundred bytes. This stream never
+    // ends, so reading it fully would not return at all, and each chunk is
+    // deliberately far larger than the read limit: keeping a whole chunk, or
+    // a view onto one, would leave the oversized buffer reachable and bound
+    // nothing.
     await t.step("an endless error body does not stall the failure path", async () => {
       await reset();
       releaseResponse = () =>
         new Response(
           new ReadableStream({
             pull(controller) {
-              controller.enqueue(new TextEncoder().encode("x".repeat(1024)));
+              controller.enqueue(new Uint8Array(50_000).fill(120));
             },
           }),
           { status: 403, headers: { "x-ratelimit-remaining": "4999" } },

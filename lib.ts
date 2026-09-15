@@ -680,7 +680,7 @@ function githubToken(): string | undefined {
  *  buffers the whole body first, so trimming its result bounds the string but not
  *  the memory, which is no bound at all against an error body of unexpected size.
  *  Only the first few hundred bytes are ever wanted here, so stop pulling once
- *  that much has arrived and cancel the remainder. A split multi-byte character
+ *  that much has arrived, copy out just those bytes, and cancel the remainder. A split multi-byte character
  *  at the cut decodes to a replacement character, which is harmless for a
  *  substring match and preferable to reading further to avoid it. */
 async function readBoundedBody(resp: Response, max: number): Promise<string> {
@@ -692,8 +692,13 @@ async function readBoundedBody(resp: Response, max: number): Promise<string> {
     while (total < max) {
       const { done, value } = await reader.read();
       if (done || !value) break;
-      chunks.push(value);
-      total += value.length;
+      // Copy out only what is still wanted and drop the reference to the
+      // chunk. A stream may hand over a chunk far larger than max, so keeping
+      // the whole one, or a subarray view onto it, would leave the oversized
+      // buffer reachable and bound nothing.
+      const wanted = value.length > max - total ? value.slice(0, max - total) : value;
+      chunks.push(wanted);
+      total += wanted.length;
     }
   } catch {
     // A body that cannot be read tells us nothing; the status still can.
