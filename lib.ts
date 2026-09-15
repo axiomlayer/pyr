@@ -676,6 +676,39 @@ function githubToken(): string | undefined {
   return Deno.env.get("GITHUB_TOKEN") || Deno.env.get("GH_TOKEN") || undefined;
 }
 
+/** Read at most `max` bytes of a response body and drop the rest. Response.text()
+ *  buffers the whole body first, so trimming its result bounds the string but not
+ *  the memory, which is no bound at all against an error body of unexpected size.
+ *  Only the first few hundred bytes are ever wanted here, so stop pulling once
+ *  that much has arrived and cancel the remainder. A split multi-byte character
+ *  at the cut decodes to a replacement character, which is harmless for a
+ *  substring match and preferable to reading further to avoid it. */
+async function readBoundedBody(resp: Response, max: number): Promise<string> {
+  const reader = resp.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (total < max) {
+      const { done, value } = await reader.read();
+      if (done || !value) break;
+      chunks.push(value);
+      total += value.length;
+    }
+  } catch {
+    // A body that cannot be read tells us nothing; the status still can.
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  const buf = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buf.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return new TextDecoder().decode(buf).slice(0, max);
+}
+
 /** What a non-2xx from the GitHub API actually was. "403" on its own sends a
  *  reader looking for a permissions problem, and the common cause is neither
  *  permissions nor pyr: unauthenticated api.github.com allows 60 requests an
@@ -715,6 +748,12 @@ function describeGithubFailure(resp: Response, body: string): string {
   // body is the only thing left that distinguishes it from a real refusal.
   if (/secondary rate limit/i.test(body)) {
     return `secondary rate limit (${authed}): wait at least a minute, then back off further if it repeats`;
+  }
+  // 429 means Too Many Requests whatever else is missing, so say so rather
+  // than reporting a throttle as an ordinary refusal. A 403 with no signal
+  // at all really may be a permissions problem, so it is left alone.
+  if (resp.status === 429) {
+    return `rate limited (${authed}): HTTP 429 with no rate limit headers; wait at least a minute`;
   }
   return authed;
 }
@@ -1433,14 +1472,8 @@ async function installPythonLocked(triple: string, pin?: PythonPin): Promise<str
 
   if (!resp.ok) {
     // Read rather than cancel: a secondary rate limit is only identifiable
-    // from the body, and it is bounded because nothing here needs more than
-    // the phrase. Failing to read must not mask the status being reported.
-    let body = "";
-    try {
-      body = (await resp.text()).slice(0, 500);
-    } catch {
-      // A body that cannot be read tells us nothing; the status still can.
-    }
+    // from the body. Bounded at the stream, not after buffering it.
+    const body = await readBoundedBody(resp, 500);
     const why = describeGithubFailure(resp, body);
     if (pin?.build) {
       throw new Error(
