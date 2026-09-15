@@ -4,12 +4,12 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-  # Deliberately unfiltered by base branch. A `branches: [main]` filter here
-  # means a pull request stacked on another branch triggers nothing at all: it
-  # shows no checks, reports no status, and can be merged with nothing having
-  # run. That is not hypothetical, it is how #40 merged into an already-merged
-  # branch unnoticed and its fix reached no one. 20 of the fleet's other 26
-  # workflows already run on every base; this brings pyr in line with them.
+  # Every pull request, whatever it targets. Filtering this to main meant a
+  # stacked PR ran no jobs at all, and GitHub reports "no checks" the same
+  # way it reports a clean run: as nothing red. #40 carried the fix for a
+  # bug that recursively uninstalls a venv and had zero check runs on it.
+  # build, smoke and release are unaffected; they already exclude pull
+  # requests or run only on tags.
   pull_request:
 
 # Coalesce re-pushes to the same ref. Main and tag pushes live in different
