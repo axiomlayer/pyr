@@ -365,9 +365,30 @@ const PROTECTED_PKGS = new Set(["pip", "setuptools", "wheel"]);
  *  fully-pinned flat lockfile. On resolver failure, the existing lockfile
  *  is left intact. */
 export async function sync(opts: SyncOptions = {}): Promise<void> {
+  // Read the declaration BEFORE ensureVenv, which is not read-only: when the
+  // managed python stamp has moved it removes .venv, recreates it and
+  // reinstalls requirements.txt. Refusing after that point would already have
+  // destroyed and rebuilt the environment, and the message below promises it
+  // did not.
+  //
+  // Step 3 further down treats every installed leaf that is not a top-level dep
+  // as an orphan and uninstalls it, looping to promote newly exposed leaves, so
+  // an empty list against a populated venv is a full recursive teardown. That
+  // is right when the file really says `dependencies = []`, and a silent
+  // catastrophe when it only looked that way, so refuse to act on a list we
+  // could not read.
+  const declared = await readPyprojectDepsDetailed();
+  if (declared.kind === "indeterminate") {
+    throw new Error(
+      `sync refused: ${declared.reason}. ` +
+        "Nothing was installed, uninstalled or written. " +
+        "Declare dependencies as a [project].dependencies array, or manage this environment without pyr sync.",
+    );
+  }
+
   await ensureVenv();
 
-  const topDeps = await readPyprojectDeps();
+  const topDeps = declared.kind === "declared" ? declared.deps : [];
   const oldLock = await readLock();
 
   if (topDeps.length === 0 && oldLock.size === 0) {
@@ -780,22 +801,174 @@ export function parseRequirementName(spec: string): string | null {
 
 // --- pyproject io ---
 
-/** Read the [project].dependencies array from a pyproject.toml file. Returns
- *  an empty list if the file or section is absent. */
-export async function readPyprojectDeps(
+/** What a pyproject.toml actually told us about its dependencies.
+ *
+ *  The three cases are kept apart because "no dependencies" and "I could not
+ *  tell" lead to opposite decisions in sync: the first may prune, the second
+ *  must not. Collapsing them into an empty array is what makes a missed
+ *  spelling delete a working environment. */
+export type PyprojectDepsRead =
+  | { kind: "absent" }
+  | { kind: "declared"; deps: string[] }
+  | { kind: "indeterminate"; reason: string };
+
+// PEP 621 lets a build backend supply the dependency list, in which case
+// pyproject declares `dynamic = ["dependencies"]` and carries no array at all.
+// The list is real, it is just not here, so reading it as an empty list is
+// wrong in the most destructive direction.
+const DYNAMIC_KEY_RE = /^[ \t]*(?:dynamic|"dynamic"|'dynamic')[ \t]*=[ \t]*\[/m;
+// Used only to tell "there is no dependencies key" from "there is one and I
+// could not resolve it". Line-anchored and exact, and applied ONLY to the
+// [project] span and the top-level region: applied to the whole document it
+// matches an unrelated `dependencies` key in, say, [tool.hatch.envs.test] and
+// refuses a sync that is perfectly well understood.
+const ANY_DEPS_KEY_RE =
+  /^[ \t]*(?:(?:project[ \t]*\.[ \t]*)?(?:dependencies|"dependencies"|'dependencies')|"project\.dependencies"|'project\.dependencies')[ \t]*=/m;
+// `project = { name = "x", dependencies = [...] }` is a valid inline table and
+// declares the same thing, but none of the locators above can see into it.
+// Nor can they read `project.dynamic = ["dependencies"]`. Both must be known
+// unknowns rather than silently "no dependencies".
+const PROJECT_INLINE_RE = /^[ \t]*(?:project|"project"|'project')[ \t]*=/m;
+// A basic quoted key may carry escapes, so `"dependenc\u0069es"` declares the
+// ordinary `dependencies` key. The literal matchers above cannot see that and
+// a regex cannot decode it, so its presence is a known unknown rather than an
+// absence. Rare in practice; silently pruning a venv over it is not acceptable.
+const ESCAPED_KEY_RE = /^[ \t]*"[^"\n]*\\[^\n]*"[ \t]*=/m;
+const DOTTED_DYNAMIC_RE =
+  /^[ \t]*(?:project|"project"|'project')[ \t]*\.[ \t]*(?:dynamic|"dynamic"|'dynamic')[ \t]*=[ \t]*\[/m;
+
+/** Read `[project].dependencies` from a pyproject.toml, reporting which of the
+ *  three cases applies. Accepts every equivalent TOML spelling of the table and
+ *  the key, including quoted keys and the top-level `project.dependencies`
+ *  dotted form, and reports `indeterminate` rather than guessing when a
+ *  dependency list is declared in a form it cannot resolve. */
+export async function readPyprojectDepsDetailed(
   path: string = "pyproject.toml",
-): Promise<string[]> {
+): Promise<PyprojectDepsRead> {
   let text: string;
   try {
     text = await Deno.readTextFile(path);
-  } catch {
-    return [];
+  } catch (err) {
+    // Only a genuinely absent file means "no dependencies declared". A
+    // permission error, a transient I/O failure, or a Windows lock says
+    // nothing about the contents, and calling that absent hands sync an empty
+    // list for a project that may have a full one.
+    if (err instanceof Deno.errors.NotFound) return { kind: "absent" };
+    return {
+      kind: "indeterminate",
+      reason: `${path}: could not be read (${err instanceof Error ? err.message : String(err)})`,
+    };
   }
+
+  const mask = maskForStructure(text);
   const project = locateProjectTable(text);
-  if (!project) return [];
-  const dependencies = locateDepsArray(text, project.start, project.end);
-  if (!dependencies) return [];
-  return parseDepsArray(text.slice(dependencies.open, dependencies.close + 1));
+  if (project) {
+    const inTable = locateDepsArray(text, project.start, project.end);
+    if (inTable) {
+      try {
+        return {
+          kind: "declared",
+          deps: parseDepsArray(text.slice(inTable.open, inTable.close + 1)),
+        };
+      } catch (err) {
+        return {
+          kind: "indeterminate",
+          reason: `${path}: the dependencies array could not be read (${
+            err instanceof Error ? err.message : String(err)
+          })`,
+        };
+      }
+    }
+  }
+
+  const dotted = locateDottedDepsArray(text);
+  if (dotted) {
+    try {
+      return {
+        kind: "declared",
+        deps: parseDepsArray(text.slice(dotted.open, dotted.close + 1)),
+      };
+    } catch (err) {
+      return {
+        kind: "indeterminate",
+        reason: `${path}: the dependencies array could not be read (${
+          err instanceof Error ? err.message : String(err)
+        })`,
+      };
+    }
+  }
+
+  // Forms that declare the project object in a shape the locators cannot read.
+  const top = topLevelSpan(text);
+  const topMask = mask.slice(top.start, top.end);
+  if (PROJECT_INLINE_RE.test(topMask)) {
+    return {
+      kind: "indeterminate",
+      reason: `${path}: [project] is declared as an inline table, which this reader cannot resolve`,
+    };
+  }
+
+  // A bare `dynamic = [...]` only means the project's inside the [project]
+  // table. At top level the same line is somebody else's key, and treating it
+  // as project.dynamic refuses a sync whose dependency state is fully known.
+  const dynamicSpans: Array<[number, number, RegExp]> = [];
+  if (project) dynamicSpans.push([project.start, project.end, DYNAMIC_KEY_RE]);
+  dynamicSpans.push([top.start, top.end, DOTTED_DYNAMIC_RE]);
+  for (const [from, to, pattern] of dynamicSpans) {
+    const region = mask.slice(from, to);
+    const dyn = pattern.exec(region);
+    if (!dyn) continue;
+    const open = from + dyn.index + dyn[0].length - 1;
+    let names: string[];
+    try {
+      const span = bracketSpanFrom(text, open);
+      names = parseDepsArray(text.slice(span.open, span.close + 1));
+    } catch {
+      return {
+        kind: "indeterminate",
+        reason: `${path}: a dynamic declaration could not be read`,
+      };
+    }
+    if (names.includes("dependencies")) {
+      return {
+        kind: "indeterminate",
+        reason:
+          `${path}: dynamic declares "dependencies", so the list comes from the build backend and is not in this file`,
+      };
+    }
+  }
+
+  // Nothing resolved. If a dependencies key is nonetheless present in a place
+  // that could be the project's, this is a form we do not understand and
+  // saying "no dependencies" would be a guess. Scoped, so an unrelated
+  // `dependencies` key under [tool.*] does not block a sync.
+  const projectMask = project ? mask.slice(project.start, project.end) : "";
+  if (ESCAPED_KEY_RE.test(projectMask) || ESCAPED_KEY_RE.test(topMask)) {
+    return {
+      kind: "indeterminate",
+      reason:
+        `${path}: a quoted key carries an escape, which this reader cannot decode into a key name`,
+    };
+  }
+  if (ANY_DEPS_KEY_RE.test(projectMask) || ANY_DEPS_KEY_RE.test(topMask)) {
+    return {
+      kind: "indeterminate",
+      reason: `${path}: a dependencies key is present in a form this reader could not resolve`,
+    };
+  }
+
+  return { kind: "absent" };
+}
+
+/** Read the [project].dependencies array from a pyproject.toml file. Returns
+ *  an empty list if the file or section is absent, or if the list could not be
+ *  resolved; callers that act destructively on the result must use
+ *  readPyprojectDepsDetailed and distinguish those cases. */
+export async function readPyprojectDeps(
+  path: string = "pyproject.toml",
+): Promise<string[]> {
+  const read = await readPyprojectDepsDetailed(path);
+  return read.kind === "declared" ? read.deps : [];
 }
 
 /** Add or replace a dependency spec in pyproject.toml [project].dependencies.
@@ -876,18 +1049,189 @@ interface TableSpan {
   end: number; // byte offset just past the table (next header or EOF)
 }
 
+/** A copy of `text` with comments and the bodies of multi-line strings blanked
+ *  to spaces, newlines and every other offset preserved exactly.
+ *
+ *  Every line-anchored regex below runs against this rather than the raw file,
+ *  so it can only ever match real structure. Without it a `[tool.example]`
+ *  value like
+ *
+ *      notes = """
+ *      [ "project" ]
+ *      dependencies = ["fake-package"]
+ *      """
+ *
+ *  is indistinguishable from a real table, and the reader would confidently
+ *  return someone else's list: pip would install it and the genuine
+ *  dependencies would be pruned as orphans. Broadening the matchers made that
+ *  reachable, so the mask is not an optimisation, it is the other half of the
+ *  fix.
+ *
+ *  Single-line strings are passed through unblanked on purpose. They cannot
+ *  contain a raw newline, so they cannot manufacture a line start for `^` to
+ *  anchor on, and blanking them would destroy the quoted table and key names
+ *  (`["project"]`) that the matchers below have to see. They are still tracked
+ *  while scanning, so a `#` inside one is not mistaken for a comment. */
+/** Index just past the string that starts at `openIdx`, or -1 if it never
+ *  terminates.
+ *
+ *  Escapes are honoured in basic strings, which is the whole reason this is a
+ *  function rather than an indexOf. Inside a multi-line basic string the
+ *  sequence \\" followed by two more quotes is content, not the terminator, so
+ *  searching for the delimiter directly stops early and everything after it,
+ *  including lines that read like `[project]` and `dependencies = [...]`, gets
+ *  exposed as structure. Literal strings, the single-quoted forms, have no
+ *  escapes at all, so a backslash in one is just a backslash. */
+function endOfString(text: string, openIdx: number): number {
+  const quote = text[openIdx];
+  const triple = text.slice(openIdx, openIdx + 3) === quote.repeat(3);
+  const honoursEscapes = quote === '"';
+  const delimiter = triple ? quote.repeat(3) : quote;
+  let i = openIdx + delimiter.length;
+  while (i < text.length) {
+    if (honoursEscapes && text[i] === "\\") {
+      i += 2;
+      continue;
+    }
+    if (text.startsWith(delimiter, i)) return i + delimiter.length;
+    // A single-line string cannot span a newline; treat that as unterminated
+    // rather than swallowing the rest of the file.
+    if (!triple && text[i] === "\n") return -1;
+    i++;
+  }
+  return -1;
+}
+
+/** The body of the string starting at `openIdx`, as [from, to) offsets. */
+function stringBody(text: string, openIdx: number, end: number): [number, number] {
+  const quote = text[openIdx];
+  const width = text.slice(openIdx, openIdx + 3) === quote.repeat(3) ? 3 : 1;
+  return [openIdx + width, end - width];
+}
+
+/** A copy of `text` with everything that is content rather than structure
+ *  blanked to spaces, newlines and every other offset preserved exactly.
+ *
+ *  Every line-anchored regex in this file runs against this rather than the raw
+ *  file, so it can only ever match real structure. Three things are blanked:
+ *  comments, the bodies of multi-line strings, and the interiors of bracketed
+ *  values. Each one is a place where content can otherwise impersonate a table
+ *  or a key, for example
+ *
+ *      notes = """
+ *      [ "project" ]
+ *      dependencies = ["fake-package"]
+ *      """
+ *
+ *  or an array of arrays whose inner bracket opens at column zero and reads as
+ *  the first table header, which truncates the top-level region and hides a
+ *  real dotted `project.dependencies` behind it. Either way the reader returns
+ *  a confident wrong answer rather than a refusal, so pip installs the wrong
+ *  thing and the genuine dependencies are pruned as orphans.
+ *
+ *  Single-line strings are passed through unblanked on purpose. They cannot
+ *  contain a raw newline, so they cannot manufacture a line start for `^` to
+ *  anchor on, and blanking them would destroy the quoted table and key names
+ *  (`["project"]`) that the matchers have to read. They are still scanned, so a
+ *  `#` or a bracket inside one is never read as structure.
+ *
+ *  Blanking an array's interior is safe because no caller reads a value out of
+ *  the mask: the key matchers stop at the opening bracket, and the span is then
+ *  walked on the original text. */
+function maskForStructure(text: string): string {
+  const out = text.split("");
+  const blank = (from: number, to: number) => {
+    for (let k = from; k < to && k < out.length; k++) {
+      if (out[k] !== "\n" && out[k] !== "\r") out[k] = " ";
+    }
+  };
+  let i = 0;
+  // True while nothing but whitespace has been seen on this line, which is the
+  // only position a table header may legally open in.
+  let atLineStart = true;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === "\n") {
+      atLineStart = true;
+      i++;
+      continue;
+    }
+    if (c === " " || c === "\t" || c === "\r") {
+      i++;
+      continue;
+    }
+    if (c === "#") {
+      const nl = text.indexOf("\n", i);
+      blank(i, nl === -1 ? text.length : nl);
+      i = nl === -1 ? text.length : nl;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      const end = endOfString(text, i);
+      if (end === -1) {
+        // Unterminated: blank the remainder rather than letting the rest of the
+        // file be read as structure it is not.
+        blank(i, text.length);
+        return out.join("");
+      }
+      const [from, to] = stringBody(text, i, end);
+      if (to - from > 0 && text.slice(i, i + 3) === c.repeat(3)) blank(from, to);
+      i = end;
+      atLineStart = false;
+      continue;
+    }
+    if (c === "[") {
+      if (atLineStart) {
+        // A table header. Leave it legible and carry on through the line.
+        atLineStart = false;
+        i++;
+        continue;
+      }
+      // A bracketed value. Nothing inside it is structure.
+      const close = findMatchingBracket(text, i);
+      if (close === -1) {
+        blank(i + 1, text.length);
+        return out.join("");
+      }
+      blank(i + 1, close);
+      i = close + 1;
+      continue;
+    }
+    atLineStart = false;
+    i++;
+  }
+  return out.join("");
+}
+
+// TOML lets one table be spelled several equivalent ways: leading whitespace is
+// allowed before the header, whitespace is allowed inside the brackets, and a
+// bare key may be quoted. `[project]`, `[ project ]` and `["project"]` are the
+// same table, so a locator that only accepts the first is not reading TOML, it
+// is matching one preferred spelling of it.
+const PROJECT_HEADER_RE =
+  /^[ \t]*\[[ \t]*(?:project|"project"|'project')[ \t]*\][ \t]*(?:#[^\n]*)?$/m;
+const ANY_HEADER_RE = /^[ \t]*\[[^\n]*\]/m;
+
 function locateProjectTable(text: string): TableSpan | null {
-  const headerRe = /^\[project\][ \t]*(?:#[^\n]*)?$/m;
-  const m = headerRe.exec(text);
+  const mask = maskForStructure(text);
+  const m = PROJECT_HEADER_RE.exec(mask);
   if (!m) return null;
   const start = m.index;
   // Find the next table header after this one; the table ends just before it.
-  const nextHeaderRe = /^\[[^\n]*\]/m;
-  nextHeaderRe.lastIndex = start + m[0].length;
-  const after = text.slice(start + m[0].length);
-  const nextMatch = /^\[[^\n]*\]/m.exec(after);
-  const end = nextMatch === null ? text.length : start + m[0].length + nextMatch.index;
+  // A sub-table such as [project.optional-dependencies] ends it too, which is
+  // what we want: its keys are not [project]'s keys.
+  const headerEnd = start + m[0].length;
+  const nextMatch = ANY_HEADER_RE.exec(mask.slice(headerEnd));
+  const end = nextMatch === null ? text.length : headerEnd + nextMatch.index;
   return { start, end };
+}
+
+/** The region above the first real table header, where a dotted `project.x` key
+ *  still means the project's own. */
+function topLevelSpan(text: string): TableSpan {
+  const mask = maskForStructure(text);
+  const first = ANY_HEADER_RE.exec(mask);
+  return { start: 0, end: first === null ? text.length : first.index };
 }
 
 interface ArraySpan {
@@ -895,13 +1239,17 @@ interface ArraySpan {
   close: number; // byte offset of the matching `]`
 }
 
-function locateDepsArray(text: string, tableStart: number, tableEnd: number): ArraySpan | null {
-  // Look for `dependencies` key inside this table only.
-  const slice = text.slice(tableStart, tableEnd);
-  const keyRe = /^[ \t]*dependencies[ \t]*=[ \t]*\[/m;
-  const m = keyRe.exec(slice);
-  if (!m) return null;
-  const open = tableStart + m.index + m[0].length - 1; // index of `[`
+// Same spelling problem as the table header: `dependencies`, `"dependencies"`
+// and `'dependencies'` are one key. The trailing `\[` must stay the last
+// character of the match so its offset is the array's opening bracket.
+const DEPS_KEY_RE = /^[ \t]*(?:dependencies|"dependencies"|'dependencies')[ \t]*=[ \t]*\[/m;
+// A dotted key is only `project.dependencies` while we are still above the
+// first table header. After `[tool.foo]` the same text means
+// `tool.foo.project.dependencies`, which is somebody else's key.
+const DOTTED_DEPS_KEY_RE =
+  /^[ \t]*(?:project|"project"|'project')[ \t]*\.[ \t]*(?:dependencies|"dependencies"|'dependencies')[ \t]*=[ \t]*\[/m;
+
+function bracketSpanFrom(text: string, open: number): ArraySpan {
   const close = findMatchingBracket(text, open);
   if (close === -1) {
     throw new Error("malformed pyproject.toml: unterminated dependencies array");
@@ -909,40 +1257,42 @@ function locateDepsArray(text: string, tableStart: number, tableEnd: number): Ar
   return { open, close };
 }
 
+function locateDepsArray(text: string, tableStart: number, tableEnd: number): ArraySpan | null {
+  // Look for the `dependencies` key inside this table only, and match against
+  // the mask so a key spelled out inside a multi-line value cannot answer.
+  const slice = maskForStructure(text).slice(tableStart, tableEnd);
+  const m = DEPS_KEY_RE.exec(slice);
+  if (!m) return null;
+  return bracketSpanFrom(text, tableStart + m.index + m[0].length - 1);
+}
+
+/** Locate a top-level `project.dependencies = [...]` dotted key, which declares
+ *  the same thing as a `[project]` table with a `dependencies` key and needs no
+ *  `[project]` header to be present at all. */
+function locateDottedDepsArray(text: string): ArraySpan | null {
+  const top = topLevelSpan(text);
+  const m = DOTTED_DEPS_KEY_RE.exec(maskForStructure(text).slice(top.start, top.end));
+  if (!m) return null;
+  return bracketSpanFrom(text, top.start + m.index + m[0].length - 1);
+}
+
 /** Walk forward from an opening `[` to its matching `]`, respecting strings.
  *  Handles single, double, basic-multiline, and literal-multiline strings, and
  *  the standard TOML escape `\\"`. */
+/** Walk forward from an opening `[` to its matching `]`, stepping over strings
+ *  so a bracket inside one does not change the depth. */
 function findMatchingBracket(text: string, openIdx: number): number {
   let depth = 0;
   let i = openIdx;
   while (i < text.length) {
     const c = text[i];
     if (c === '"' || c === "'") {
-      // Detect triple-quoted string.
-      if (text.slice(i, i + 3) === c.repeat(3)) {
-        const end = text.indexOf(c.repeat(3), i + 3);
-        if (end === -1) return -1;
-        i = end + 3;
-        continue;
-      }
-      // Single-line string. Skip escapes for "; literal strings (') don't escape.
-      i++;
-      while (i < text.length) {
-        if (c === '"' && text[i] === "\\") {
-          i += 2;
-          continue;
-        }
-        if (text[i] === c) {
-          i++;
-          break;
-        }
-        if (text[i] === "\n" && c === "'") return -1; // unterminated literal
-        i++;
-      }
+      const end = endOfString(text, i);
+      if (end === -1) return -1;
+      i = end;
       continue;
     }
     if (c === "#") {
-      // Skip to end of line.
       const nl = text.indexOf("\n", i);
       i = nl === -1 ? text.length : nl;
       continue;
@@ -960,6 +1310,60 @@ function findMatchingBracket(text: string, openIdx: number): number {
 /** Parse the entries out of an array literal `[...]` (including the brackets).
  *  Strips comments and whitespace. Used for tokens that are guaranteed strings
  *  in our domain (PEP 508 specs). */
+/** Decode the escapes TOML defines for a basic string. Anything else is not a
+ *  valid basic string, and throwing is the right answer: the caller turns it
+ *  into an indeterminate read rather than a guess. */
+function decodeBasicEscapes(raw: string): string {
+  let out = "";
+  let i = 0;
+  while (i < raw.length) {
+    if (raw[i] !== "\\") {
+      out += raw[i];
+      i++;
+      continue;
+    }
+    const code = raw[i + 1];
+    i += 2;
+    switch (code) {
+      case "b":
+        out += "\b";
+        break;
+      case "t":
+        out += "\t";
+        break;
+      case "n":
+        out += "\n";
+        break;
+      case "f":
+        out += "\f";
+        break;
+      case "r":
+        out += "\r";
+        break;
+      case '"':
+        out += '"';
+        break;
+      case "\\":
+        out += "\\";
+        break;
+      case "u":
+      case "U": {
+        const width = code === "u" ? 4 : 8;
+        const hex = raw.slice(i, i + width);
+        if (hex.length !== width || !/^[0-9a-fA-F]+$/.test(hex)) {
+          throw new Error(`malformed \\${code} escape in pyproject.toml`);
+        }
+        out += String.fromCodePoint(parseInt(hex, 16));
+        i += width;
+        break;
+      }
+      default:
+        throw new Error(`unsupported escape \\${code} in pyproject.toml`);
+    }
+  }
+  return out;
+}
+
 function parseDepsArray(literal: string): string[] {
   // Strip the surrounding brackets.
   if (!literal.startsWith("[") || !literal.endsWith("]")) {
@@ -980,25 +1384,15 @@ function parseDepsArray(literal: string): string[] {
       continue;
     }
     if (c === '"' || c === "'") {
-      // Read until matching quote (no triple-quote support; deps are single-line).
-      const quote = c;
-      let j = i + 1;
-      let value = "";
-      while (j < body.length) {
-        if (quote === '"' && body[j] === "\\" && j + 1 < body.length) {
-          value += body[j + 1];
-          j += 2;
-          continue;
-        }
-        if (body[j] === quote) break;
-        value += body[j];
-        j++;
-      }
-      if (j >= body.length) {
-        throw new Error("parseDepsArray: unterminated string");
-      }
-      out.push(value);
-      i = j + 1;
+      const end = endOfString(body, i);
+      if (end === -1) throw new Error("parseDepsArray: unterminated string");
+      const [from, to] = stringBody(body, i, end);
+      const raw = body.slice(from, to);
+      // A literal string is taken verbatim; a basic one is decoded, so that a
+      // name written as "dependenc\\u0069es" compares equal to the real key
+      // rather than being matched literally and missed.
+      out.push(c === '"' ? decodeBasicEscapes(raw) : raw);
+      i = end;
       continue;
     }
     throw new Error(`parseDepsArray: unexpected character '${c}' at offset ${i}`);
