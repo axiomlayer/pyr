@@ -22,6 +22,7 @@ import {
   pyrHome,
   readLock,
   readPyprojectDeps,
+  readPyprojectDepsDetailed,
   removePyprojectDep,
   sha256Hex,
   stamp,
@@ -804,4 +805,120 @@ Deno.test({
       await Deno.remove(tmp, { recursive: true });
     }
   },
+});
+
+// --- pyproject dependency reads: equivalent TOML spellings ---
+//
+// TOML has more than one valid way to write the same table and the same key.
+// A reader that accepts only the preferred spelling returns an empty list for
+// a file that genuinely declares dependencies, and sync then treats every
+// installed leaf as an orphan and uninstalls the tree. Each case below is a
+// valid pyproject that means dependencies = ["requests"].
+const EQUIVALENT_REQUESTS: Array<[string, string]> = [
+  ["canonical", `[project]\nname = "x"\ndependencies = ["requests"]\n`],
+  ["quoted key", `[project]\n"dependencies" = ["requests"]\n`],
+  ["literal-quoted key", `[project]\n'dependencies' = ['requests']\n`],
+  ["dotted top-level key", `project.dependencies = ["requests"]\n`],
+  ["dotted key with spaces", `project . dependencies = ["requests"]\n`],
+  ["dotted key, quoted segments", `"project"."dependencies" = ["requests"]\n`],
+  ["quoted table header", `["project"]\ndependencies = ["requests"]\n`],
+  ["spaced table header", `[ project ]\ndependencies = ["requests"]\n`],
+  ["indented header and key", `  [project]\n  dependencies = ["requests"]\n`],
+  ["header with trailing comment", `[project] # x\ndependencies = ["requests"]\n`],
+  ["tab separators", `[project]\n\tdependencies\t=\t["requests"]\n`],
+];
+
+Deno.test("readPyprojectDeps accepts every equivalent TOML spelling", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = `${dir}/pyproject.toml`;
+  try {
+    for (const [label, text] of EQUIVALENT_REQUESTS) {
+      await Deno.writeTextFile(path, text);
+      assertEquals(await readPyprojectDeps(path), ["requests"], label);
+      const read = await readPyprojectDepsDetailed(path);
+      assertEquals(read.kind, "declared", label);
+    }
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("readPyprojectDepsDetailed separates absent from indeterminate", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = `${dir}/pyproject.toml`;
+  try {
+    // Genuinely no dependency list: pruning against this is correct.
+    await Deno.writeTextFile(path, `[project]\nname = "x"\n`);
+    assertEquals((await readPyprojectDepsDetailed(path)).kind, "absent");
+
+    // An explicitly empty list is a declaration, not an absence.
+    await Deno.writeTextFile(path, `[project]\ndependencies = []\n`);
+    const empty = await readPyprojectDepsDetailed(path);
+    assertEquals(empty.kind, "declared");
+    assertEquals(empty.kind === "declared" ? empty.deps : null, []);
+
+    // The build backend supplies the list. It exists, it is just not here, so
+    // reading it as empty would be wrong in the destructive direction.
+    await Deno.writeTextFile(
+      path,
+      `[project]\nname = "x"\ndynamic = ["dependencies"]\n`,
+    );
+    assertEquals((await readPyprojectDepsDetailed(path)).kind, "indeterminate");
+
+    // dynamic that does not cover dependencies still reads normally.
+    await Deno.writeTextFile(
+      path,
+      `[project]\ndynamic = ["version"]\ndependencies = ["requests"]\n`,
+    );
+    assertEquals(await readPyprojectDeps(path), ["requests"]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("a dependencies key outside [project] is not mistaken for one", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = `${dir}/pyproject.toml`;
+  try {
+    // optional-dependencies is a different table and must not leak in.
+    await Deno.writeTextFile(
+      path,
+      `[project]\nname = "x"\n[project.optional-dependencies]\ndev = ["pytest"]\n`,
+    );
+    assertEquals((await readPyprojectDepsDetailed(path)).kind, "absent");
+
+    // build-system.requires is not the project's dependency list either.
+    await Deno.writeTextFile(
+      path,
+      `[build-system]\nrequires = ["setuptools"]\n[project]\nname = "x"\n`,
+    );
+    assertEquals((await readPyprojectDepsDetailed(path)).kind, "absent");
+
+    // A dotted project.dependencies below a table header belongs to that
+    // table, not to [project], so it must not be read as the project's.
+    await Deno.writeTextFile(
+      path,
+      `[tool.other]\nproject.dependencies = ["requests"]\n`,
+    );
+    assertEquals(await readPyprojectDeps(path), []);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("extras, markers and comments survive the read", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = `${dir}/pyproject.toml`;
+  try {
+    await Deno.writeTextFile(
+      path,
+      `[project]\ndependencies = [\n  "uvicorn[standard]>=0.30", # server\n  'httpx; python_version>="3.11"',\n]\n`,
+    );
+    assertEquals(await readPyprojectDeps(path), [
+      "uvicorn[standard]>=0.30",
+      'httpx; python_version>="3.11"',
+    ]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });
