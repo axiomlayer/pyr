@@ -1035,3 +1035,88 @@ Deno.test("only a missing file is absent; other read failures are not", async ()
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+Deno.test("content that imitates structure cannot answer for it", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = `${dir}/pyproject.toml`;
+  try {
+    // An escaped quote before a triple quote is string content, not the
+    // terminator. Scanning for the delimiter with indexOf stops here and
+    // exposes the rest of the body as structure.
+    await Deno.writeTextFile(
+      path,
+      [
+        "[tool.x]",
+        'notes = """a \\""" ',
+        '[ "project" ]',
+        'dependencies = ["fake"]',
+        '"""',
+        "",
+        "[project]",
+        'dependencies = ["requests"]',
+        "",
+      ].join("\n"),
+    );
+    assertEquals(await readPyprojectDeps(path), ["requests"]);
+
+    // An array of arrays whose inner bracket opens at column zero is not a
+    // table header; reading it as one truncates the top-level region and hides
+    // the real dotted declaration behind it.
+    await Deno.writeTextFile(
+      path,
+      'matrix = [\n["a"],\n["b"],\n]\nproject.dependencies = ["requests"]\n',
+    );
+    assertEquals(await readPyprojectDeps(path), ["requests"]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("escapes are decoded, or the read refuses", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = `${dir}/pyproject.toml`;
+  try {
+    // A dependency value's escapes are decoded rather than passed through.
+    await Deno.writeTextFile(
+      path,
+      '[project]\ndependencies = ["httpx; python_version>=\\"3.11\\""]\n',
+    );
+    assertEquals(await readPyprojectDeps(path), [
+      'httpx; python_version>="3.11"',
+    ]);
+
+    // A dynamic name written with an escape still names "dependencies", so the
+    // list comes from the build backend and must not read as absent.
+    await Deno.writeTextFile(
+      path,
+      '[project]\nname = "x"\ndynamic = ["dependenc\\u0069es"]\n',
+    );
+    assertEquals((await readPyprojectDepsDetailed(path)).kind, "indeterminate");
+
+    // Same for a quoted key carrying an escape: it declares the ordinary key,
+    // and a regex cannot decode it, so refuse rather than prune.
+    await Deno.writeTextFile(
+      path,
+      '[project]\n"dependenc\\u0069es" = ["requests"]\n',
+    );
+    assertEquals((await readPyprojectDepsDetailed(path)).kind, "indeterminate");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("a bare dynamic key outside [project] is not the project's", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = `${dir}/pyproject.toml`;
+  try {
+    // Top level, so this is somebody else's key. [project] genuinely has no
+    // dependencies, and refusing every sync over this would be wrong.
+    await Deno.writeTextFile(
+      path,
+      'dynamic = ["dependencies"]\n[project]\nname = "x"\n',
+    );
+    assertEquals((await readPyprojectDepsDetailed(path)).kind, "absent");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});

@@ -687,11 +687,64 @@ async function downloadFile(url: string, path: string, failure: string): Promise
   }
 }
 
+/** GitHub tooling is split on the name: the gh CLI and this fleet's dotfiles
+ *  workflow set GH_TOKEN, while GitHub Actions and .agentic-dotfiles set
+ *  GITHUB_TOKEN. Reading only one means a token can be present and silently
+ *  unused, which looks exactly like having no token at all: an unauthenticated
+ *  call onto the shared per-IP pool. Both are accepted, and every caller goes
+ *  through here so the rate-limit message cannot disagree with the request. */
+function githubToken(): string | undefined {
+  return Deno.env.get("GITHUB_TOKEN") || Deno.env.get("GH_TOKEN") || undefined;
+}
+
+/** What a non-2xx from the GitHub API actually was. "403" on its own sends a
+ *  reader looking for a permissions problem, and the common cause is neither
+ *  permissions nor pyr: unauthenticated api.github.com allows 60 requests an
+ *  hour per IP, and every GitHub-hosted runner on the platform shares that
+ *  pool, so a CI job can pass and then fail on identical bytes minutes later.
+ *
+ *  GitHub throttles in two ways and they look different on the wire. The
+ *  primary limit sets x-ratelimit-remaining to 0 and says when it resets. A
+ *  secondary limit does not: remaining can be nonzero or absent, retry-after
+ *  is sent only sometimes, and the one dependable signal is the phrase in the
+ *  body. Checking only remaining therefore reports a secondary limit as an
+ *  ordinary refusal, which is the exact ambiguity this exists to remove, so
+ *  all three signals are read and the body is taken in preference to guessing.
+ *  Ordered deliberately: retry-after is GitHub's own instruction and wins. */
+function describeGithubFailure(resp: Response, body: string): string {
+  const remaining = resp.headers.get("x-ratelimit-remaining");
+  const limit = resp.headers.get("x-ratelimit-limit");
+  const reset = resp.headers.get("x-ratelimit-reset");
+  const retryAfter = resp.headers.get("retry-after");
+  const authed = githubToken() ? "authenticated" : "unauthenticated";
+  const throttled = resp.status === 403 || resp.status === 429;
+  if (!throttled) return authed;
+
+  if (retryAfter) {
+    return `rate limited (${authed}): GitHub asks for ${retryAfter}s before retrying`;
+  }
+  if (remaining === "0") {
+    const resetAt = reset
+      ? new Date(Number(reset) * 1000).toISOString().replace(/\.\d+Z$/, "Z")
+      : "an unstated time";
+    const fix = githubToken()
+      ? "this token's budget is spent; wait for the reset"
+      : "set GITHUB_TOKEN or GH_TOKEN to move off the shared per-IP pool";
+    return `rate limited (${authed}, ${limit ?? "?"} per hour, resets ${resetAt}): ${fix}`;
+  }
+  // GitHub does not always send retry-after for a secondary limit, so the
+  // body is the only thing left that distinguishes it from a real refusal.
+  if (/secondary rate limit/i.test(body)) {
+    return `secondary rate limit (${authed}): wait at least a minute, then back off further if it repeats`;
+  }
+  return authed;
+}
+
 function githubHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     Accept: "application/vnd.github.v3+json",
   };
-  const token = Deno.env.get("GITHUB_TOKEN");
+  const token = githubToken();
   if (token) {
     headers["Authorization"] = `Bearer ${token}`;
   }
@@ -776,6 +829,11 @@ const ANY_DEPS_KEY_RE =
 // Nor can they read `project.dynamic = ["dependencies"]`. Both must be known
 // unknowns rather than silently "no dependencies".
 const PROJECT_INLINE_RE = /^[ \t]*(?:project|"project"|'project')[ \t]*=/m;
+// A basic quoted key may carry escapes, so `"dependenc\u0069es"` declares the
+// ordinary `dependencies` key. The literal matchers above cannot see that and
+// a regex cannot decode it, so its presence is a known unknown rather than an
+// absence. Rare in practice; silently pruning a venv over it is not acceptable.
+const ESCAPED_KEY_RE = /^[ \t]*"[^"\n]*\\[^\n]*"[ \t]*=/m;
 const DOTTED_DYNAMIC_RE =
   /^[ \t]*(?:project|"project"|'project')[ \t]*\.[ \t]*(?:dynamic|"dynamic"|'dynamic')[ \t]*=[ \t]*\[/m;
 
@@ -807,19 +865,37 @@ export async function readPyprojectDepsDetailed(
   if (project) {
     const inTable = locateDepsArray(text, project.start, project.end);
     if (inTable) {
-      return {
-        kind: "declared",
-        deps: parseDepsArray(text.slice(inTable.open, inTable.close + 1)),
-      };
+      try {
+        return {
+          kind: "declared",
+          deps: parseDepsArray(text.slice(inTable.open, inTable.close + 1)),
+        };
+      } catch (err) {
+        return {
+          kind: "indeterminate",
+          reason: `${path}: the dependencies array could not be read (${
+            err instanceof Error ? err.message : String(err)
+          })`,
+        };
+      }
     }
   }
 
   const dotted = locateDottedDepsArray(text);
   if (dotted) {
-    return {
-      kind: "declared",
-      deps: parseDepsArray(text.slice(dotted.open, dotted.close + 1)),
-    };
+    try {
+      return {
+        kind: "declared",
+        deps: parseDepsArray(text.slice(dotted.open, dotted.close + 1)),
+      };
+    } catch (err) {
+      return {
+        kind: "indeterminate",
+        reason: `${path}: the dependencies array could not be read (${
+          err instanceof Error ? err.message : String(err)
+        })`,
+      };
+    }
   }
 
   // Forms that declare the project object in a shape the locators cannot read.
@@ -832,12 +908,15 @@ export async function readPyprojectDepsDetailed(
     };
   }
 
-  const dynamicSpans: Array<[number, number]> = [];
-  if (project) dynamicSpans.push([project.start, project.end]);
-  dynamicSpans.push([top.start, top.end]);
-  for (const [from, to] of dynamicSpans) {
+  // A bare `dynamic = [...]` only means the project's inside the [project]
+  // table. At top level the same line is somebody else's key, and treating it
+  // as project.dynamic refuses a sync whose dependency state is fully known.
+  const dynamicSpans: Array<[number, number, RegExp]> = [];
+  if (project) dynamicSpans.push([project.start, project.end, DYNAMIC_KEY_RE]);
+  dynamicSpans.push([top.start, top.end, DOTTED_DYNAMIC_RE]);
+  for (const [from, to, pattern] of dynamicSpans) {
     const region = mask.slice(from, to);
-    const dyn = DYNAMIC_KEY_RE.exec(region) ?? DOTTED_DYNAMIC_RE.exec(region);
+    const dyn = pattern.exec(region);
     if (!dyn) continue;
     const open = from + dyn.index + dyn[0].length - 1;
     let names: string[];
@@ -864,6 +943,13 @@ export async function readPyprojectDepsDetailed(
   // saying "no dependencies" would be a guess. Scoped, so an unrelated
   // `dependencies` key under [tool.*] does not block a sync.
   const projectMask = project ? mask.slice(project.start, project.end) : "";
+  if (ESCAPED_KEY_RE.test(projectMask) || ESCAPED_KEY_RE.test(topMask)) {
+    return {
+      kind: "indeterminate",
+      reason:
+        `${path}: a quoted key carries an escape, which this reader cannot decode into a key name`,
+    };
+  }
   if (ANY_DEPS_KEY_RE.test(projectMask) || ANY_DEPS_KEY_RE.test(topMask)) {
     return {
       kind: "indeterminate",
@@ -986,6 +1072,72 @@ interface TableSpan {
  *  anchor on, and blanking them would destroy the quoted table and key names
  *  (`["project"]`) that the matchers below have to see. They are still tracked
  *  while scanning, so a `#` inside one is not mistaken for a comment. */
+/** Index just past the string that starts at `openIdx`, or -1 if it never
+ *  terminates.
+ *
+ *  Escapes are honoured in basic strings, which is the whole reason this is a
+ *  function rather than an indexOf. Inside a multi-line basic string the
+ *  sequence \\" followed by two more quotes is content, not the terminator, so
+ *  searching for the delimiter directly stops early and everything after it,
+ *  including lines that read like `[project]` and `dependencies = [...]`, gets
+ *  exposed as structure. Literal strings, the single-quoted forms, have no
+ *  escapes at all, so a backslash in one is just a backslash. */
+function endOfString(text: string, openIdx: number): number {
+  const quote = text[openIdx];
+  const triple = text.slice(openIdx, openIdx + 3) === quote.repeat(3);
+  const honoursEscapes = quote === '"';
+  const delimiter = triple ? quote.repeat(3) : quote;
+  let i = openIdx + delimiter.length;
+  while (i < text.length) {
+    if (honoursEscapes && text[i] === "\\") {
+      i += 2;
+      continue;
+    }
+    if (text.startsWith(delimiter, i)) return i + delimiter.length;
+    // A single-line string cannot span a newline; treat that as unterminated
+    // rather than swallowing the rest of the file.
+    if (!triple && text[i] === "\n") return -1;
+    i++;
+  }
+  return -1;
+}
+
+/** The body of the string starting at `openIdx`, as [from, to) offsets. */
+function stringBody(text: string, openIdx: number, end: number): [number, number] {
+  const quote = text[openIdx];
+  const width = text.slice(openIdx, openIdx + 3) === quote.repeat(3) ? 3 : 1;
+  return [openIdx + width, end - width];
+}
+
+/** A copy of `text` with everything that is content rather than structure
+ *  blanked to spaces, newlines and every other offset preserved exactly.
+ *
+ *  Every line-anchored regex in this file runs against this rather than the raw
+ *  file, so it can only ever match real structure. Three things are blanked:
+ *  comments, the bodies of multi-line strings, and the interiors of bracketed
+ *  values. Each one is a place where content can otherwise impersonate a table
+ *  or a key, for example
+ *
+ *      notes = """
+ *      [ "project" ]
+ *      dependencies = ["fake-package"]
+ *      """
+ *
+ *  or an array of arrays whose inner bracket opens at column zero and reads as
+ *  the first table header, which truncates the top-level region and hides a
+ *  real dotted `project.dependencies` behind it. Either way the reader returns
+ *  a confident wrong answer rather than a refusal, so pip installs the wrong
+ *  thing and the genuine dependencies are pruned as orphans.
+ *
+ *  Single-line strings are passed through unblanked on purpose. They cannot
+ *  contain a raw newline, so they cannot manufacture a line start for `^` to
+ *  anchor on, and blanking them would destroy the quoted table and key names
+ *  (`["project"]`) that the matchers have to read. They are still scanned, so a
+ *  `#` or a bracket inside one is never read as structure.
+ *
+ *  Blanking an array's interior is safe because no caller reads a value out of
+ *  the mask: the key matchers stop at the opening bracket, and the span is then
+ *  walked on the original text. */
 function maskForStructure(text: string): string {
   const out = text.split("");
   const blank = (from: number, to: number) => {
@@ -994,8 +1146,20 @@ function maskForStructure(text: string): string {
     }
   };
   let i = 0;
+  // True while nothing but whitespace has been seen on this line, which is the
+  // only position a table header may legally open in.
+  let atLineStart = true;
   while (i < text.length) {
     const c = text[i];
+    if (c === "\n") {
+      atLineStart = true;
+      i++;
+      continue;
+    }
+    if (c === " " || c === "\t" || c === "\r") {
+      i++;
+      continue;
+    }
     if (c === "#") {
       const nl = text.indexOf("\n", i);
       blank(i, nl === -1 ? text.length : nl);
@@ -1003,36 +1167,37 @@ function maskForStructure(text: string): string {
       continue;
     }
     if (c === '"' || c === "'") {
-      if (text.slice(i, i + 3) === c.repeat(3)) {
-        const close = text.indexOf(c.repeat(3), i + 3);
-        if (close === -1) {
-          // Unterminated: blank the remainder rather than letting the rest of
-          // the file be read as structure it is not.
-          blank(i + 3, text.length);
-          return out.join("");
-        }
-        blank(i + 3, close);
-        i = close + 3;
-        continue;
+      const end = endOfString(text, i);
+      if (end === -1) {
+        // Unterminated: blank the remainder rather than letting the rest of the
+        // file be read as structure it is not.
+        blank(i, text.length);
+        return out.join("");
       }
-      // Single-line string: step over it so an interior # or bracket is not
-      // read as structure, but leave its characters intact.
-      const quote = c;
-      i++;
-      while (i < text.length) {
-        if (quote === '"' && text[i] === "\\") {
-          i += 2;
-          continue;
-        }
-        if (text[i] === quote) {
-          i++;
-          break;
-        }
-        if (text[i] === "\n") break; // unterminated; let the line end it
-        i++;
-      }
+      const [from, to] = stringBody(text, i, end);
+      if (to - from > 0 && text.slice(i, i + 3) === c.repeat(3)) blank(from, to);
+      i = end;
+      atLineStart = false;
       continue;
     }
+    if (c === "[") {
+      if (atLineStart) {
+        // A table header. Leave it legible and carry on through the line.
+        atLineStart = false;
+        i++;
+        continue;
+      }
+      // A bracketed value. Nothing inside it is structure.
+      const close = findMatchingBracket(text, i);
+      if (close === -1) {
+        blank(i + 1, text.length);
+        return out.join("");
+      }
+      blank(i + 1, close);
+      i = close + 1;
+      continue;
+    }
+    atLineStart = false;
     i++;
   }
   return out.join("");
@@ -1114,37 +1279,20 @@ function locateDottedDepsArray(text: string): ArraySpan | null {
 /** Walk forward from an opening `[` to its matching `]`, respecting strings.
  *  Handles single, double, basic-multiline, and literal-multiline strings, and
  *  the standard TOML escape `\\"`. */
+/** Walk forward from an opening `[` to its matching `]`, stepping over strings
+ *  so a bracket inside one does not change the depth. */
 function findMatchingBracket(text: string, openIdx: number): number {
   let depth = 0;
   let i = openIdx;
   while (i < text.length) {
     const c = text[i];
     if (c === '"' || c === "'") {
-      // Detect triple-quoted string.
-      if (text.slice(i, i + 3) === c.repeat(3)) {
-        const end = text.indexOf(c.repeat(3), i + 3);
-        if (end === -1) return -1;
-        i = end + 3;
-        continue;
-      }
-      // Single-line string. Skip escapes for "; literal strings (') don't escape.
-      i++;
-      while (i < text.length) {
-        if (c === '"' && text[i] === "\\") {
-          i += 2;
-          continue;
-        }
-        if (text[i] === c) {
-          i++;
-          break;
-        }
-        if (text[i] === "\n" && c === "'") return -1; // unterminated literal
-        i++;
-      }
+      const end = endOfString(text, i);
+      if (end === -1) return -1;
+      i = end;
       continue;
     }
     if (c === "#") {
-      // Skip to end of line.
       const nl = text.indexOf("\n", i);
       i = nl === -1 ? text.length : nl;
       continue;
@@ -1162,6 +1310,60 @@ function findMatchingBracket(text: string, openIdx: number): number {
 /** Parse the entries out of an array literal `[...]` (including the brackets).
  *  Strips comments and whitespace. Used for tokens that are guaranteed strings
  *  in our domain (PEP 508 specs). */
+/** Decode the escapes TOML defines for a basic string. Anything else is not a
+ *  valid basic string, and throwing is the right answer: the caller turns it
+ *  into an indeterminate read rather than a guess. */
+function decodeBasicEscapes(raw: string): string {
+  let out = "";
+  let i = 0;
+  while (i < raw.length) {
+    if (raw[i] !== "\\") {
+      out += raw[i];
+      i++;
+      continue;
+    }
+    const code = raw[i + 1];
+    i += 2;
+    switch (code) {
+      case "b":
+        out += "\b";
+        break;
+      case "t":
+        out += "\t";
+        break;
+      case "n":
+        out += "\n";
+        break;
+      case "f":
+        out += "\f";
+        break;
+      case "r":
+        out += "\r";
+        break;
+      case '"':
+        out += '"';
+        break;
+      case "\\":
+        out += "\\";
+        break;
+      case "u":
+      case "U": {
+        const width = code === "u" ? 4 : 8;
+        const hex = raw.slice(i, i + width);
+        if (hex.length !== width || !/^[0-9a-fA-F]+$/.test(hex)) {
+          throw new Error(`malformed \\${code} escape in pyproject.toml`);
+        }
+        out += String.fromCodePoint(parseInt(hex, 16));
+        i += width;
+        break;
+      }
+      default:
+        throw new Error(`unsupported escape \\${code} in pyproject.toml`);
+    }
+  }
+  return out;
+}
+
 function parseDepsArray(literal: string): string[] {
   // Strip the surrounding brackets.
   if (!literal.startsWith("[") || !literal.endsWith("]")) {
@@ -1182,25 +1384,15 @@ function parseDepsArray(literal: string): string[] {
       continue;
     }
     if (c === '"' || c === "'") {
-      // Read until matching quote (no triple-quote support; deps are single-line).
-      const quote = c;
-      let j = i + 1;
-      let value = "";
-      while (j < body.length) {
-        if (quote === '"' && body[j] === "\\" && j + 1 < body.length) {
-          value += body[j + 1];
-          j += 2;
-          continue;
-        }
-        if (body[j] === quote) break;
-        value += body[j];
-        j++;
-      }
-      if (j >= body.length) {
-        throw new Error("parseDepsArray: unterminated string");
-      }
-      out.push(value);
-      i = j + 1;
+      const end = endOfString(body, i);
+      if (end === -1) throw new Error("parseDepsArray: unterminated string");
+      const [from, to] = stringBody(body, i, end);
+      const raw = body.slice(from, to);
+      // A literal string is taken verbatim; a basic one is decoded, so that a
+      // name written as "dependenc\\u0069es" compares equal to the real key
+      // rather than being matched literally and missed.
+      out.push(c === '"' ? decodeBasicEscapes(raw) : raw);
+      i = end;
       continue;
     }
     throw new Error(`parseDepsArray: unexpected character '${c}' at offset ${i}`);
@@ -1634,14 +1826,25 @@ async function installPythonLocked(triple: string, pin?: PythonPin): Promise<str
   );
 
   if (!resp.ok) {
-    await resp.body?.cancel();
+    // Read rather than cancel: a secondary rate limit is only identifiable
+    // from the body, and it is bounded because nothing here needs more than
+    // the phrase. Failing to read must not mask the status being reported.
+    let body = "";
+    try {
+      body = (await resp.text()).slice(0, 500);
+    } catch {
+      // A body that cannot be read tells us nothing; the status still can.
+    }
+    const why = describeGithubFailure(resp, body);
     if (pin?.build) {
       throw new Error(
-        `requested python build ${pin.build} is unavailable (github api: ${resp.status}); ` +
+        `requested python build ${pin.build} is unavailable (github api: ${resp.status}, ${why}); ` +
           "existing python is untouched",
       );
     }
-    throw new Error(`github api error: ${resp.status}; existing python is untouched`);
+    throw new Error(
+      `github api error: ${resp.status} (${why}); existing python is untouched`,
+    );
   }
 
   const release = await resp.json() as { tag_name?: string; assets: GithubReleaseAsset[] };
