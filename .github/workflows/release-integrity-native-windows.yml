@@ -71,9 +71,12 @@ jobs:
           if ($version -ne 'deno 2.9.5') { throw "expected deno 2.9.5, got $version" }
       - name: download and verify the matching native PE
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           deno run `
             --allow-net=api.github.com,github.com,release-assets.githubusercontent.com `
+            --allow-env=GITHUB_TOKEN `
             --allow-read `
             --allow-write `
             scripts/verify-release-integrity.ts `
@@ -88,10 +91,13 @@ jobs:
             -Manifest 'release\pyr-v0.1.1.json'
       - name: prove the opposite Windows architecture is refused before execution
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
           deno run `
             --allow-net=api.github.com,github.com,release-assets.githubusercontent.com `
+            --allow-env=GITHUB_TOKEN `
             --allow-read `
             --allow-write `
             scripts/verify-release-integrity.ts `

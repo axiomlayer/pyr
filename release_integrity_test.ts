@@ -534,6 +534,45 @@ Deno.test("release bytes allow only one GitHub CDN redirect and never send autho
   assertEquals(new URL(requests[1].url).hostname, "release-assets.githubusercontent.com");
 });
 
+Deno.test("GitHub API authentication stays on the exact API request", async () => {
+  const requests: Array<{
+    authorization: string | null;
+    apiVersion: string | null;
+    url: string;
+  }> = [];
+  const fetcher: FetchLike = (input, init) => {
+    const headers = new Headers(init?.headers);
+    requests.push({
+      authorization: headers.get("authorization"),
+      apiVersion: headers.get("x-github-api-version"),
+      url: String(input),
+    });
+    return Promise.resolve(new Response("{}"));
+  };
+  await fetchGitHubJson(
+    "https://api.github.com/repos/jasenc7/pyr/releases/tags/v0.1.1",
+    fetcher,
+    "fabricated-ci-token",
+  );
+  assertEquals(requests, [{
+    authorization: "Bearer fabricated-ci-token",
+    apiVersion: "2022-11-28",
+    url: "https://api.github.com/repos/jasenc7/pyr/releases/tags/v0.1.1",
+  }]);
+
+  let assetAuthorization: string | null | undefined;
+  await fetchWithReleasePolicy(
+    "https://github.com/jasenc7/pyr/releases/download/v0.1.1/SHA256SUMS",
+    "release-asset",
+    (_input, init) => {
+      assetAuthorization = new Headers(init?.headers).get("authorization");
+      return Promise.resolve(new Response(new Uint8Array()));
+    },
+    "fabricated-ci-token",
+  );
+  assertEquals(assetAuthorization, null);
+});
+
 Deno.test("network policy refuses API and off-CDN redirects", async () => {
   const apiUrl = "https://api.github.com/repos/jasenc7/pyr/releases/tags/v0.1.1";
   await assertRejects(
@@ -698,10 +737,13 @@ Deno.test("network response bounds reject declared and streamed size mismatches"
 });
 
 Deno.test("persistent Windows runners have a trusted-only workflow and exact host routing", async () => {
-  const hosted = await Deno.readTextFile(".github/workflows/release-integrity.yml");
-  const native = await Deno.readTextFile(
-    ".github/workflows/release-integrity-native-windows.yml",
+  const hosted = (await Deno.readTextFile(".github/workflows/release-integrity.yml")).replaceAll(
+    "\r\n",
+    "\n",
   );
+  const native = (await Deno.readTextFile(
+    ".github/workflows/release-integrity-native-windows.yml",
+  )).replaceAll("\r\n", "\n");
   assertEquals(hosted.includes("\non:\n  pull_request:\n  push:\n"), true);
   const triggerBlock = native.split("\non:\n", 2)[1]?.split("\npermissions:", 1)[0] ?? "";
   for (

@@ -52,9 +52,12 @@ jobs:
         with:
           deno-version: v2.9.5
       - name: verify every published release asset
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           deno run \
             --allow-net=api.github.com,github.com,release-assets.githubusercontent.com \
+            --allow-env=GITHUB_TOKEN \
             --allow-read \
             scripts/verify-release-integrity.ts
 
@@ -86,9 +89,12 @@ jobs:
         with:
           deno-version: v2.9.5
       - name: download and verify the matching pinned native asset
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           deno run \
             --allow-net=api.github.com,github.com,release-assets.githubusercontent.com \
+            --allow-env=GITHUB_TOKEN \
             --allow-read \
             --allow-write \
             scripts/verify-release-integrity.ts \

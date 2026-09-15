@@ -700,6 +700,7 @@ export async function fetchWithReleasePolicy(
   value: string,
   kind: "github-api" | "release-asset",
   fetcher: FetchLike = fetch,
+  githubToken?: string,
 ): Promise<Response> {
   const initial = exactHttpsUrl(value, "request URL");
   const expectedInitialHost = kind === "github-api" ? "api.github.com" : "github.com";
@@ -716,7 +717,9 @@ export async function fetchWithReleasePolicy(
         headers: kind === "github-api"
           ? {
             Accept: "application/vnd.github+json",
+            ...(githubToken ? { Authorization: `Bearer ${githubToken}` } : {}),
             "User-Agent": "pyr-release-integrity/1",
+            "X-GitHub-Api-Version": "2022-11-28",
           }
           : { "User-Agent": "pyr-release-integrity/1" },
         redirect: "manual",
@@ -882,10 +885,11 @@ async function readBoundedBody(
 export async function fetchGitHubJson(
   url: string,
   fetcher: FetchLike = fetch,
+  githubToken?: string,
 ): Promise<unknown> {
   const parsed = exactHttpsUrl(url, "GitHub API URL");
   const displayUrl = `${parsed.origin}${parsed.pathname}`;
-  const response = await fetchWithReleasePolicy(url, "github-api", fetcher);
+  const response = await fetchWithReleasePolicy(url, "github-api", fetcher, githubToken);
   await requireSuccessfulResponse(response, displayUrl);
   const bytes = await readBoundedBody(response, displayUrl, MAX_API_RESPONSE_BYTES);
   try {
@@ -914,6 +918,7 @@ export async function verifyPublishedRelease(
   manifest: ReleaseManifest,
   selectedKeys: string[],
   outputDir?: string,
+  githubToken?: string,
 ): Promise<void> {
   const selected = selectedKeys.map((key) => {
     const asset = manifest.assets.find((candidate) => candidate.key === key);
@@ -925,8 +930,8 @@ export async function verifyPublishedRelease(
   const repository = manifest.release.repository;
   const tag = manifest.release.tag;
   const apiBase = `https://api.github.com/repos/${repository}`;
-  const release = await fetchGitHubJson(`${apiBase}/releases/tags/${tag}`);
-  const ref = await fetchGitHubJson(`${apiBase}/git/ref/tags/${tag}`);
+  const release = await fetchGitHubJson(`${apiBase}/releases/tags/${tag}`, fetch, githubToken);
+  const ref = await fetchGitHubJson(`${apiBase}/git/ref/tags/${tag}`, fetch, githubToken);
   validatePublishedMetadata(manifest, release, ref);
 
   const checksumBytes = await fetchPinnedBytes(
@@ -963,11 +968,24 @@ interface CliOptions {
 
 function usage(): string {
   return [
-    "usage: deno run --allow-net --allow-read --allow-write scripts/verify-release-integrity.ts",
+    "usage: deno run --allow-net --allow-read --allow-write --allow-env=GITHUB_TOKEN,GH_TOKEN scripts/verify-release-integrity.ts",
     "       [--manifest PATH] [--asset KEY ...] [--output-dir PATH]",
     "",
     "With no --asset flag, verifies every pinned release archive.",
   ].join("\n");
+}
+
+function githubTokenFromEnvironment(): string | undefined {
+  for (const name of ["GITHUB_TOKEN", "GH_TOKEN"]) {
+    try {
+      const value = Deno.env.get(name);
+      if (value) return value;
+    } catch {
+      // Environment access is optional for local, unauthenticated verification.
+      return undefined;
+    }
+  }
+  return undefined;
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -999,7 +1017,12 @@ if (import.meta.main) {
   try {
     const options = parseArgs(Deno.args);
     const manifest = await loadReleaseManifest(options.manifestPath);
-    await verifyPublishedRelease(manifest, options.selectedKeys, options.outputDir);
+    await verifyPublishedRelease(
+      manifest,
+      options.selectedKeys,
+      options.outputDir,
+      githubTokenFromEnvironment(),
+    );
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     Deno.exit(1);
