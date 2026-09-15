@@ -1,4 +1,8 @@
-import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 
 // Exercise real download streams, archives, filesystem moves, and cleanup.
 // Only the interpreter probe is simulated, so these tests need no CPython
@@ -266,6 +270,45 @@ Deno.test("Python installation preserves the live runtime until replacement is v
       await reset();
       releaseResponse = () => new Response("rate limited", { status: 403 });
       await assertRejects(() => upgrade(["--python"]), Error, "github api error: 403");
+      await assertPreserved();
+    });
+    // A bare "403" sends a reader looking for a permissions problem. These two
+    // steps pin the message to the cause and the fix, because that is the
+    // whole point of the header read: a 403 with remaining=0 is a queue, not a
+    // refusal, and which one it is decides what the human does next.
+    await t.step("an exhausted shared pool names the token as the fix", async () => {
+      await reset();
+      const before = Deno.env.get("GITHUB_TOKEN");
+      Deno.env.delete("GITHUB_TOKEN");
+      try {
+        releaseResponse = () =>
+          new Response("rate limited", {
+            status: 403,
+            headers: {
+              "x-ratelimit-remaining": "0",
+              "x-ratelimit-limit": "60",
+              "x-ratelimit-reset": "1789430400",
+            },
+          });
+        const error = await assertRejects(() => upgrade(["--python"]), Error);
+        assertStringIncludes(error.message, "rate limited (unauthenticated, 60 per hour");
+        assertStringIncludes(error.message, "set GITHUB_TOKEN");
+        assertStringIncludes(error.message, "2026-09-15T00:00:00Z");
+      } finally {
+        if (before === undefined) Deno.env.delete("GITHUB_TOKEN");
+        else Deno.env.set("GITHUB_TOKEN", before);
+      }
+      await assertPreserved();
+    });
+    await t.step("a 403 that is not a rate limit does not blame the token", async () => {
+      await reset();
+      releaseResponse = () =>
+        new Response("forbidden", {
+          status: 403,
+          headers: { "x-ratelimit-remaining": "4999", "x-ratelimit-limit": "5000" },
+        });
+      const error = await assertRejects(() => upgrade(["--python"]), Error);
+      assertEquals(error.message.includes("rate limited"), false, error.message);
       await assertPreserved();
     });
     await t.step("metadata connection failure leaves the current runtime intact", async () => {

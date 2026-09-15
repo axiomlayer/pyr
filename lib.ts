@@ -666,6 +666,30 @@ async function downloadFile(url: string, path: string, failure: string): Promise
   }
 }
 
+/** What a non-2xx from the GitHub API actually was. "403" on its own sends a
+ *  reader looking for a permissions problem, and the common cause is neither
+ *  permissions nor pyr: unauthenticated api.github.com allows 60 requests an
+ *  hour per IP, and every GitHub-hosted runner on the platform shares that
+ *  pool, so a CI job can pass and then fail on identical bytes minutes later.
+ *  The rate limit headers say which it was, so say it rather than making the
+ *  next person guess. */
+function describeGithubFailure(resp: Response): string {
+  const remaining = resp.headers.get("x-ratelimit-remaining");
+  const limit = resp.headers.get("x-ratelimit-limit");
+  const reset = resp.headers.get("x-ratelimit-reset");
+  const authed = Deno.env.get("GITHUB_TOKEN") ? "authenticated" : "unauthenticated";
+  if ((resp.status === 403 || resp.status === 429) && remaining === "0") {
+    const resetAt = reset
+      ? new Date(Number(reset) * 1000).toISOString().replace(/\.\d+Z$/, "Z")
+      : "an unstated time";
+    const fix = Deno.env.get("GITHUB_TOKEN")
+      ? "this token's budget is spent; wait for the reset"
+      : "set GITHUB_TOKEN to move off the shared per-IP pool";
+    return `rate limited (${authed}, ${limit ?? "?"} per hour, resets ${resetAt}): ${fix}`;
+  }
+  return authed;
+}
+
 function githubHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     Accept: "application/vnd.github.v3+json",
@@ -1380,13 +1404,16 @@ async function installPythonLocked(triple: string, pin?: PythonPin): Promise<str
 
   if (!resp.ok) {
     await resp.body?.cancel();
+    const why = describeGithubFailure(resp);
     if (pin?.build) {
       throw new Error(
-        `requested python build ${pin.build} is unavailable (github api: ${resp.status}); ` +
+        `requested python build ${pin.build} is unavailable (github api: ${resp.status}, ${why}); ` +
           "existing python is untouched",
       );
     }
-    throw new Error(`github api error: ${resp.status}; existing python is untouched`);
+    throw new Error(
+      `github api error: ${resp.status} (${why}); existing python is untouched`,
+    );
   }
 
   const release = await resp.json() as { tag_name?: string; assets: GithubReleaseAsset[] };
