@@ -45,6 +45,11 @@ tag, verify the selected ZIP against that manifest, and only then install it; `p
 managed CPython bootstrap apply the same fail-closed check. The v0.1.0 manifest was backfilled for
 compatibility with the first release.
 
+The [release evidence manifest](./release/README.md) independently pins the current release object,
+tag commit, asset IDs, archive bytes, and extracted executable bytes. A scheduled sidecar downloads
+all six exact-tag assets, and native Windows x86_64 and ARM64 jobs execute the corresponding pinned
+PE rather than accepting an asset name as architecture proof.
+
 The shipped executable is standalone: it neither uses nor modifies an existing Deno, fnm, Node, or
 npm installation. Its release compilation graph uses only local source and Deno/Node built-ins—no
 JSR packages. The website has a separate build toolchain and is not embedded in release artifacts.
