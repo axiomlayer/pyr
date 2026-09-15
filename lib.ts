@@ -365,9 +365,30 @@ const PROTECTED_PKGS = new Set(["pip", "setuptools", "wheel"]);
  *  fully-pinned flat lockfile. On resolver failure, the existing lockfile
  *  is left intact. */
 export async function sync(opts: SyncOptions = {}): Promise<void> {
+  // Read the declaration BEFORE ensureVenv, which is not read-only: when the
+  // managed python stamp has moved it removes .venv, recreates it and
+  // reinstalls requirements.txt. Refusing after that point would already have
+  // destroyed and rebuilt the environment, and the message below promises it
+  // did not.
+  //
+  // Step 3 further down treats every installed leaf that is not a top-level dep
+  // as an orphan and uninstalls it, looping to promote newly exposed leaves, so
+  // an empty list against a populated venv is a full recursive teardown. That
+  // is right when the file really says `dependencies = []`, and a silent
+  // catastrophe when it only looked that way, so refuse to act on a list we
+  // could not read.
+  const declared = await readPyprojectDepsDetailed();
+  if (declared.kind === "indeterminate") {
+    throw new Error(
+      `sync refused: ${declared.reason}. ` +
+        "Nothing was installed, uninstalled or written. " +
+        "Declare dependencies as a [project].dependencies array, or manage this environment without pyr sync.",
+    );
+  }
+
   await ensureVenv();
 
-  const topDeps = await readPyprojectDeps();
+  const topDeps = declared.kind === "declared" ? declared.deps : [];
   const oldLock = await readLock();
 
   if (topDeps.length === 0 && oldLock.size === 0) {
@@ -727,22 +748,141 @@ export function parseRequirementName(spec: string): string | null {
 
 // --- pyproject io ---
 
-/** Read the [project].dependencies array from a pyproject.toml file. Returns
- *  an empty list if the file or section is absent. */
-export async function readPyprojectDeps(
+/** What a pyproject.toml actually told us about its dependencies.
+ *
+ *  The three cases are kept apart because "no dependencies" and "I could not
+ *  tell" lead to opposite decisions in sync: the first may prune, the second
+ *  must not. Collapsing them into an empty array is what makes a missed
+ *  spelling delete a working environment. */
+export type PyprojectDepsRead =
+  | { kind: "absent" }
+  | { kind: "declared"; deps: string[] }
+  | { kind: "indeterminate"; reason: string };
+
+// PEP 621 lets a build backend supply the dependency list, in which case
+// pyproject declares `dynamic = ["dependencies"]` and carries no array at all.
+// The list is real, it is just not here, so reading it as an empty list is
+// wrong in the most destructive direction.
+const DYNAMIC_KEY_RE = /^[ \t]*(?:dynamic|"dynamic"|'dynamic')[ \t]*=[ \t]*\[/m;
+// Used only to tell "there is no dependencies key" from "there is one and I
+// could not resolve it". Line-anchored and exact, and applied ONLY to the
+// [project] span and the top-level region: applied to the whole document it
+// matches an unrelated `dependencies` key in, say, [tool.hatch.envs.test] and
+// refuses a sync that is perfectly well understood.
+const ANY_DEPS_KEY_RE =
+  /^[ \t]*(?:(?:project[ \t]*\.[ \t]*)?(?:dependencies|"dependencies"|'dependencies')|"project\.dependencies"|'project\.dependencies')[ \t]*=/m;
+// `project = { name = "x", dependencies = [...] }` is a valid inline table and
+// declares the same thing, but none of the locators above can see into it.
+// Nor can they read `project.dynamic = ["dependencies"]`. Both must be known
+// unknowns rather than silently "no dependencies".
+const PROJECT_INLINE_RE = /^[ \t]*(?:project|"project"|'project')[ \t]*=/m;
+const DOTTED_DYNAMIC_RE =
+  /^[ \t]*(?:project|"project"|'project')[ \t]*\.[ \t]*(?:dynamic|"dynamic"|'dynamic')[ \t]*=[ \t]*\[/m;
+
+/** Read `[project].dependencies` from a pyproject.toml, reporting which of the
+ *  three cases applies. Accepts every equivalent TOML spelling of the table and
+ *  the key, including quoted keys and the top-level `project.dependencies`
+ *  dotted form, and reports `indeterminate` rather than guessing when a
+ *  dependency list is declared in a form it cannot resolve. */
+export async function readPyprojectDepsDetailed(
   path: string = "pyproject.toml",
-): Promise<string[]> {
+): Promise<PyprojectDepsRead> {
   let text: string;
   try {
     text = await Deno.readTextFile(path);
-  } catch {
-    return [];
+  } catch (err) {
+    // Only a genuinely absent file means "no dependencies declared". A
+    // permission error, a transient I/O failure, or a Windows lock says
+    // nothing about the contents, and calling that absent hands sync an empty
+    // list for a project that may have a full one.
+    if (err instanceof Deno.errors.NotFound) return { kind: "absent" };
+    return {
+      kind: "indeterminate",
+      reason: `${path}: could not be read (${err instanceof Error ? err.message : String(err)})`,
+    };
   }
+
+  const mask = maskForStructure(text);
   const project = locateProjectTable(text);
-  if (!project) return [];
-  const dependencies = locateDepsArray(text, project.start, project.end);
-  if (!dependencies) return [];
-  return parseDepsArray(text.slice(dependencies.open, dependencies.close + 1));
+  if (project) {
+    const inTable = locateDepsArray(text, project.start, project.end);
+    if (inTable) {
+      return {
+        kind: "declared",
+        deps: parseDepsArray(text.slice(inTable.open, inTable.close + 1)),
+      };
+    }
+  }
+
+  const dotted = locateDottedDepsArray(text);
+  if (dotted) {
+    return {
+      kind: "declared",
+      deps: parseDepsArray(text.slice(dotted.open, dotted.close + 1)),
+    };
+  }
+
+  // Forms that declare the project object in a shape the locators cannot read.
+  const top = topLevelSpan(text);
+  const topMask = mask.slice(top.start, top.end);
+  if (PROJECT_INLINE_RE.test(topMask)) {
+    return {
+      kind: "indeterminate",
+      reason: `${path}: [project] is declared as an inline table, which this reader cannot resolve`,
+    };
+  }
+
+  const dynamicSpans: Array<[number, number]> = [];
+  if (project) dynamicSpans.push([project.start, project.end]);
+  dynamicSpans.push([top.start, top.end]);
+  for (const [from, to] of dynamicSpans) {
+    const region = mask.slice(from, to);
+    const dyn = DYNAMIC_KEY_RE.exec(region) ?? DOTTED_DYNAMIC_RE.exec(region);
+    if (!dyn) continue;
+    const open = from + dyn.index + dyn[0].length - 1;
+    let names: string[];
+    try {
+      const span = bracketSpanFrom(text, open);
+      names = parseDepsArray(text.slice(span.open, span.close + 1));
+    } catch {
+      return {
+        kind: "indeterminate",
+        reason: `${path}: a dynamic declaration could not be read`,
+      };
+    }
+    if (names.includes("dependencies")) {
+      return {
+        kind: "indeterminate",
+        reason:
+          `${path}: dynamic declares "dependencies", so the list comes from the build backend and is not in this file`,
+      };
+    }
+  }
+
+  // Nothing resolved. If a dependencies key is nonetheless present in a place
+  // that could be the project's, this is a form we do not understand and
+  // saying "no dependencies" would be a guess. Scoped, so an unrelated
+  // `dependencies` key under [tool.*] does not block a sync.
+  const projectMask = project ? mask.slice(project.start, project.end) : "";
+  if (ANY_DEPS_KEY_RE.test(projectMask) || ANY_DEPS_KEY_RE.test(topMask)) {
+    return {
+      kind: "indeterminate",
+      reason: `${path}: a dependencies key is present in a form this reader could not resolve`,
+    };
+  }
+
+  return { kind: "absent" };
+}
+
+/** Read the [project].dependencies array from a pyproject.toml file. Returns
+ *  an empty list if the file or section is absent, or if the list could not be
+ *  resolved; callers that act destructively on the result must use
+ *  readPyprojectDepsDetailed and distinguish those cases. */
+export async function readPyprojectDeps(
+  path: string = "pyproject.toml",
+): Promise<string[]> {
+  const read = await readPyprojectDepsDetailed(path);
+  return read.kind === "declared" ? read.deps : [];
 }
 
 /** Add or replace a dependency spec in pyproject.toml [project].dependencies.
@@ -823,18 +963,110 @@ interface TableSpan {
   end: number; // byte offset just past the table (next header or EOF)
 }
 
+/** A copy of `text` with comments and the bodies of multi-line strings blanked
+ *  to spaces, newlines and every other offset preserved exactly.
+ *
+ *  Every line-anchored regex below runs against this rather than the raw file,
+ *  so it can only ever match real structure. Without it a `[tool.example]`
+ *  value like
+ *
+ *      notes = """
+ *      [ "project" ]
+ *      dependencies = ["fake-package"]
+ *      """
+ *
+ *  is indistinguishable from a real table, and the reader would confidently
+ *  return someone else's list: pip would install it and the genuine
+ *  dependencies would be pruned as orphans. Broadening the matchers made that
+ *  reachable, so the mask is not an optimisation, it is the other half of the
+ *  fix.
+ *
+ *  Single-line strings are passed through unblanked on purpose. They cannot
+ *  contain a raw newline, so they cannot manufacture a line start for `^` to
+ *  anchor on, and blanking them would destroy the quoted table and key names
+ *  (`["project"]`) that the matchers below have to see. They are still tracked
+ *  while scanning, so a `#` inside one is not mistaken for a comment. */
+function maskForStructure(text: string): string {
+  const out = text.split("");
+  const blank = (from: number, to: number) => {
+    for (let k = from; k < to && k < out.length; k++) {
+      if (out[k] !== "\n" && out[k] !== "\r") out[k] = " ";
+    }
+  };
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === "#") {
+      const nl = text.indexOf("\n", i);
+      blank(i, nl === -1 ? text.length : nl);
+      i = nl === -1 ? text.length : nl;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      if (text.slice(i, i + 3) === c.repeat(3)) {
+        const close = text.indexOf(c.repeat(3), i + 3);
+        if (close === -1) {
+          // Unterminated: blank the remainder rather than letting the rest of
+          // the file be read as structure it is not.
+          blank(i + 3, text.length);
+          return out.join("");
+        }
+        blank(i + 3, close);
+        i = close + 3;
+        continue;
+      }
+      // Single-line string: step over it so an interior # or bracket is not
+      // read as structure, but leave its characters intact.
+      const quote = c;
+      i++;
+      while (i < text.length) {
+        if (quote === '"' && text[i] === "\\") {
+          i += 2;
+          continue;
+        }
+        if (text[i] === quote) {
+          i++;
+          break;
+        }
+        if (text[i] === "\n") break; // unterminated; let the line end it
+        i++;
+      }
+      continue;
+    }
+    i++;
+  }
+  return out.join("");
+}
+
+// TOML lets one table be spelled several equivalent ways: leading whitespace is
+// allowed before the header, whitespace is allowed inside the brackets, and a
+// bare key may be quoted. `[project]`, `[ project ]` and `["project"]` are the
+// same table, so a locator that only accepts the first is not reading TOML, it
+// is matching one preferred spelling of it.
+const PROJECT_HEADER_RE =
+  /^[ \t]*\[[ \t]*(?:project|"project"|'project')[ \t]*\][ \t]*(?:#[^\n]*)?$/m;
+const ANY_HEADER_RE = /^[ \t]*\[[^\n]*\]/m;
+
 function locateProjectTable(text: string): TableSpan | null {
-  const headerRe = /^\[project\][ \t]*(?:#[^\n]*)?$/m;
-  const m = headerRe.exec(text);
+  const mask = maskForStructure(text);
+  const m = PROJECT_HEADER_RE.exec(mask);
   if (!m) return null;
   const start = m.index;
   // Find the next table header after this one; the table ends just before it.
-  const nextHeaderRe = /^\[[^\n]*\]/m;
-  nextHeaderRe.lastIndex = start + m[0].length;
-  const after = text.slice(start + m[0].length);
-  const nextMatch = /^\[[^\n]*\]/m.exec(after);
-  const end = nextMatch === null ? text.length : start + m[0].length + nextMatch.index;
+  // A sub-table such as [project.optional-dependencies] ends it too, which is
+  // what we want: its keys are not [project]'s keys.
+  const headerEnd = start + m[0].length;
+  const nextMatch = ANY_HEADER_RE.exec(mask.slice(headerEnd));
+  const end = nextMatch === null ? text.length : headerEnd + nextMatch.index;
   return { start, end };
+}
+
+/** The region above the first real table header, where a dotted `project.x` key
+ *  still means the project's own. */
+function topLevelSpan(text: string): TableSpan {
+  const mask = maskForStructure(text);
+  const first = ANY_HEADER_RE.exec(mask);
+  return { start: 0, end: first === null ? text.length : first.index };
 }
 
 interface ArraySpan {
@@ -842,18 +1074,41 @@ interface ArraySpan {
   close: number; // byte offset of the matching `]`
 }
 
-function locateDepsArray(text: string, tableStart: number, tableEnd: number): ArraySpan | null {
-  // Look for `dependencies` key inside this table only.
-  const slice = text.slice(tableStart, tableEnd);
-  const keyRe = /^[ \t]*dependencies[ \t]*=[ \t]*\[/m;
-  const m = keyRe.exec(slice);
-  if (!m) return null;
-  const open = tableStart + m.index + m[0].length - 1; // index of `[`
+// Same spelling problem as the table header: `dependencies`, `"dependencies"`
+// and `'dependencies'` are one key. The trailing `\[` must stay the last
+// character of the match so its offset is the array's opening bracket.
+const DEPS_KEY_RE = /^[ \t]*(?:dependencies|"dependencies"|'dependencies')[ \t]*=[ \t]*\[/m;
+// A dotted key is only `project.dependencies` while we are still above the
+// first table header. After `[tool.foo]` the same text means
+// `tool.foo.project.dependencies`, which is somebody else's key.
+const DOTTED_DEPS_KEY_RE =
+  /^[ \t]*(?:project|"project"|'project')[ \t]*\.[ \t]*(?:dependencies|"dependencies"|'dependencies')[ \t]*=[ \t]*\[/m;
+
+function bracketSpanFrom(text: string, open: number): ArraySpan {
   const close = findMatchingBracket(text, open);
   if (close === -1) {
     throw new Error("malformed pyproject.toml: unterminated dependencies array");
   }
   return { open, close };
+}
+
+function locateDepsArray(text: string, tableStart: number, tableEnd: number): ArraySpan | null {
+  // Look for the `dependencies` key inside this table only, and match against
+  // the mask so a key spelled out inside a multi-line value cannot answer.
+  const slice = maskForStructure(text).slice(tableStart, tableEnd);
+  const m = DEPS_KEY_RE.exec(slice);
+  if (!m) return null;
+  return bracketSpanFrom(text, tableStart + m.index + m[0].length - 1);
+}
+
+/** Locate a top-level `project.dependencies = [...]` dotted key, which declares
+ *  the same thing as a `[project]` table with a `dependencies` key and needs no
+ *  `[project]` header to be present at all. */
+function locateDottedDepsArray(text: string): ArraySpan | null {
+  const top = topLevelSpan(text);
+  const m = DOTTED_DEPS_KEY_RE.exec(maskForStructure(text).slice(top.start, top.end));
+  if (!m) return null;
+  return bracketSpanFrom(text, top.start + m.index + m[0].length - 1);
 }
 
 /** Walk forward from an opening `[` to its matching `]`, respecting strings.
