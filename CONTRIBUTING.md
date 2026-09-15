@@ -87,7 +87,10 @@ GitHub token or repository secret:
 
 ```sh
 deno test --allow-read release_integrity_test.ts
-deno run --allow-net --allow-read --allow-write scripts/verify-release-integrity.ts
+deno run \
+  --allow-net=api.github.com,github.com,release-assets.githubusercontent.com \
+  --allow-read \
+  scripts/verify-release-integrity.ts
 ```
 
 See [`release/README.md`](./release/README.md) before changing a published-release pin.

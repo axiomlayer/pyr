@@ -2,7 +2,6 @@ name: release-integrity
 
 on:
   pull_request:
-    branches: [main]
   push:
     branches: [main]
   schedule:
@@ -39,8 +38,6 @@ jobs:
           deno lint release_integrity_test.ts scripts/verify-release-integrity.ts
           deno check release_integrity_test.ts scripts/verify-release-integrity.ts
       - name: tamper-negative tests
-        env:
-          PYR_TEST_TOKEN: fabricated-release-integrity-token
         run: deno test --allow-read release_integrity_test.ts
 
   published-assets:
@@ -61,15 +58,23 @@ jobs:
             --allow-read \
             scripts/verify-release-integrity.ts
 
-  native-windows-release:
+  hosted-native-release:
     needs: manifest-tests
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: windows-2022
+          - runner: ubuntu-24.04
+            asset: linux-x86_64
             architecture: x86_64
-          - runner: windows-11-arm
+          - runner: ubuntu-24.04-arm
+            asset: linux-aarch64
+            architecture: aarch64
+          - runner: macos-15-intel
+            asset: darwin-x86_64
+            architecture: x86_64
+          - runner: macos-15
+            asset: darwin-aarch64
             architecture: aarch64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
@@ -80,35 +85,43 @@ jobs:
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: v2.9.5
-      - name: download and verify pinned native asset
-        shell: pwsh
+      - name: download and verify the matching pinned native asset
         run: |
-          deno run `
-            --allow-net=api.github.com,github.com,release-assets.githubusercontent.com `
-            --allow-read `
-            --allow-write `
-            scripts/verify-release-integrity.ts `
-            --asset windows-${{ matrix.architecture }} `
+          deno run \
+            --allow-net=api.github.com,github.com,release-assets.githubusercontent.com \
+            --allow-read \
+            --allow-write \
+            scripts/verify-release-integrity.ts \
+            --asset ${{ matrix.asset }} \
             --output-dir .verified
-      - name: execute matching PE on the native runner architecture
-        shell: pwsh
+      - name: execute on the hosted native architecture
         run: |
-          .\scripts\verify-native-windows.ps1 `
-            -Architecture '${{ matrix.architecture }}' `
-            -Binary '.verified\pyr.exe' `
-            -Manifest 'release\pyr-v0.1.1.json'
+          set -euo pipefail
+          actual_arch=$(uname -m)
+          case '${{ matrix.architecture }}' in
+            x86_64) test "$actual_arch" = x86_64 ;;
+            aarch64)
+              case "$actual_arch" in
+                arm64|aarch64) ;;
+                *) exit 1 ;;
+              esac
+              ;;
+          esac
+          expected=$(deno eval 'console.log(JSON.parse(Deno.readTextFileSync("release/pyr-v0.1.1.json")).release.version)')
+          test "$(.verified/pyr --version)" = "$expected"
+          .verified/pyr --help | grep -q 'usage: pyr'
 
   verify:
     if: always()
-    needs: [manifest-tests, published-assets, native-windows-release]
+    needs: [manifest-tests, published-assets, hosted-native-release]
     runs-on: ubuntu-24.04
     steps:
       - name: require the complete release proof
         env:
           MANIFEST_TESTS: ${{ needs.manifest-tests.result }}
           PUBLISHED_ASSETS: ${{ needs.published-assets.result }}
-          NATIVE_WINDOWS_RELEASE: ${{ needs.native-windows-release.result }}
+          HOSTED_NATIVE_RELEASE: ${{ needs.hosted-native-release.result }}
         run: |
           test "$MANIFEST_TESTS" = success
           test "$PUBLISHED_ASSETS" = success
-          test "$NATIVE_WINDOWS_RELEASE" = success
+          test "$HOSTED_NATIVE_RELEASE" = success

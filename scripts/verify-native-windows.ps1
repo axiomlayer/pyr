@@ -36,6 +36,11 @@ if ($asset.Count -ne 1) {
 if ([string]$asset[0].executable.path -ne "pyr.exe" -or [string]$asset[0].executable.format -ne "pe") {
     throw "$assetKey does not declare a root pyr.exe PE"
 }
+$expectedSize = [long]$asset[0].executable.size
+$expectedSha256 = [string]$asset[0].executable.sha256
+if ($expectedSize -le 0 -or $expectedSha256 -notmatch '^[0-9a-f]{64}$') {
+    throw "$assetKey has an invalid executable size or SHA-256 pin"
+}
 
 $resolvedBinary = (Resolve-Path -LiteralPath $Binary).Path
 $bytes = [System.IO.File]::ReadAllBytes($resolvedBinary)
@@ -58,7 +63,23 @@ $expectedMachine = switch ($Architecture) {
 if ($machine -ne $expectedMachine) {
     throw ("PE machine is 0x{0:x4}, expected 0x{1:x4}" -f $machine, $expectedMachine)
 }
+if ($bytes.LongLength -ne $expectedSize) {
+    throw "$resolvedBinary is $($bytes.LongLength) bytes, expected $expectedSize"
+}
+$sha256 = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $actualSha256 = ([BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+} finally {
+    $sha256.Dispose()
+}
+if (-not [StringComparer]::Ordinal.Equals($actualSha256, $expectedSha256)) {
+    throw "$resolvedBinary SHA-256 does not match the independently pinned executable digest"
+}
 
+$beforeVersionSha256 = (Get-FileHash -LiteralPath $resolvedBinary -Algorithm SHA256).Hash.ToLowerInvariant()
+if (-not [StringComparer]::Ordinal.Equals($beforeVersionSha256, $expectedSha256)) {
+    throw "$resolvedBinary changed before --version execution"
+}
 $reportedVersion = (& $resolvedBinary --version 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0) {
     throw "$resolvedBinary --version exited $LASTEXITCODE`: $reportedVersion"
@@ -67,6 +88,10 @@ if ($reportedVersion -ne $Version) {
     throw "$resolvedBinary reported version $reportedVersion, expected $Version"
 }
 
+$beforeHelpSha256 = (Get-FileHash -LiteralPath $resolvedBinary -Algorithm SHA256).Hash.ToLowerInvariant()
+if (-not [StringComparer]::Ordinal.Equals($beforeHelpSha256, $expectedSha256)) {
+    throw "$resolvedBinary changed before --help execution"
+}
 $help = (& $resolvedBinary --help 2>&1 | Out-String)
 if ($LASTEXITCODE -ne 0 -or $help -notmatch "usage: pyr") {
     throw "$resolvedBinary --help did not execute successfully"

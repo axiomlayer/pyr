@@ -10,9 +10,16 @@ release. It records four distinct things that the release's own `SHA256SUMS` can
    architecture.
 
 The scheduled `release-integrity` workflow resolves only the exact tag and exact asset URLs in this
-file. It never resolves `latest`, downloads anonymously, rejects a changed or missing release, and
-re-measures both layers. Its native Windows matrix then executes the pinned x86_64 and ARM64
-executables on matching GitHub-hosted Windows architectures.
+file. It never resolves `latest`, downloads anonymously, bounds every response, permits only
+GitHub's single release-CDN redirect, rejects a changed or missing release, and re-measures both
+layers. GitHub-hosted Linux and macOS runners execute all four matching Unix binaries. A separate
+workflow with no pull-request trigger executes the pinned Windows ARM64 PE on Ocelot and the x86_64
+PE on Siberian, then proves each host refuses the opposite architecture before execution.
+
+The two Windows runners must belong to the non-default `fleet-trusted` runner group. Restrict that
+group to this workflow at the fully qualified `refs/heads/main` ref; labels route to Ocelot or
+Siberian but are not an authorization boundary. When the repository moves from `jasenc7` to
+`axiomlayer`, update that selected-workflow owner atomically with the move.
 
 This manifest is source evidence, not a fleet distribution endpoint. `jasenc7/pyr` remains the
 current publisher. The ownership fields reserve AxiomLayer as the promotion boundary without
@@ -29,13 +36,19 @@ replacement changes its asset ID as well as its digest and must be explained in 
 The verifier can be run locally with:
 
 ```sh
-deno run --allow-net --allow-read --allow-write scripts/verify-release-integrity.ts
+deno run \
+  --allow-net=api.github.com,github.com,release-assets.githubusercontent.com \
+  --allow-read \
+  scripts/verify-release-integrity.ts
 ```
 
 To retain one verified executable for a native smoke test:
 
 ```sh
-deno run --allow-net --allow-read --allow-write \
+deno run \
+  --allow-net=api.github.com,github.com,release-assets.githubusercontent.com \
+  --allow-read \
+  --allow-write \
   scripts/verify-release-integrity.ts \
   --asset windows-aarch64 \
   --output-dir ./verified-release

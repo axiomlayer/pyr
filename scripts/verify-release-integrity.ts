@@ -51,6 +51,15 @@ interface VerifiedAsset {
   executableSha256: string;
 }
 
+export type FetchLike = (
+  input: string | URL | Request,
+  init?: RequestInit,
+) => Promise<Response>;
+
+const FETCH_TIMEOUT_MS = 30_000;
+const MAX_API_RESPONSE_BYTES = 1_048_576;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
 const REQUIRED_ASSETS = new Map<string, {
   os: ReleaseOs;
   architecture: Architecture;
@@ -291,6 +300,9 @@ function assertPublishedAsset(
   if (integerField(apiAsset.size, `${expected.name}.size`) !== expected.size) {
     fail(`${expected.name} published size changed`);
   }
+  if (textField(apiAsset.state, `${expected.name}.state`) !== "uploaded") {
+    fail(`${expected.name} is not in the uploaded state`);
+  }
   if (
     textField(apiAsset.browser_download_url, `${expected.name}.browser_download_url`) !==
       expected.url
@@ -528,20 +540,47 @@ export function readOnlyZipEntry(archive: Uint8Array): ZipEntry {
 
 async function inflate(entry: ZipEntry): Promise<Uint8Array> {
   if (entry.compressionMethod === 0) return entry.compressed.slice();
-  let buffer: ArrayBuffer;
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
-    const stream = new Blob([Uint8Array.from(entry.compressed).buffer]).stream().pipeThrough(
+    reader = new Blob([Uint8Array.from(entry.compressed).buffer]).stream().pipeThrough(
       new DecompressionStream("deflate-raw"),
-    );
-    buffer = await new Response(stream).arrayBuffer();
+    ).getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > entry.uncompressedSize) {
+        await reader.cancel();
+        fail("decompressed executable exceeds the ZIP directory size");
+      }
+      chunks.push(value);
+    }
   } catch (error) {
+    try {
+      await reader?.cancel();
+    } catch {
+      // Preserve the decompression failure below.
+    }
+    if (
+      error instanceof Error &&
+      error.message === "decompressed executable exceeds the ZIP directory size"
+    ) {
+      throw error;
+    }
     fail(
       `could not decompress ZIP entry: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  const bytes = new Uint8Array(buffer);
-  if (bytes.byteLength !== entry.uncompressedSize) {
+  if (total !== entry.uncompressedSize) {
     fail("decompressed executable size does not match the ZIP directory");
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
   }
   return bytes;
 }
@@ -603,6 +642,12 @@ export async function verifyAssetArchive(
   if (entry.name !== asset.executable.path) {
     fail(`${asset.name} must contain only ${asset.executable.path} at its root`);
   }
+  if (entry.uncompressedSize !== asset.executable.size) {
+    fail(`${asset.name} ZIP executable size differs from the independent pin`);
+  }
+  if (entry.compressionMethod === 0 && entry.compressedSize !== entry.uncompressedSize) {
+    fail(`${asset.name} stored ZIP entry declares inconsistent sizes`);
+  }
   const binary = await inflate(entry);
   if (binary.byteLength !== asset.executable.size) {
     fail(`${asset.name} extracted executable byte length changed`);
@@ -618,23 +663,251 @@ export async function verifyAssetArchive(
   return { binary, archiveSha256, executableSha256 };
 }
 
-async function fetchJson(url: string): Promise<unknown> {
-  const response = await fetch(url, {
-    headers: {
-      Accept: "application/vnd.github+json",
-      "User-Agent": "pyr-release-integrity/1",
-    },
-  });
-  if (!response.ok) fail(`GET ${url} failed: ${response.status}`);
-  return await response.json();
+function exactHttpsUrl(value: string, label: string): URL {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    fail(`${label} is not a valid URL`);
+  }
+  if (
+    url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.port !== ""
+  ) {
+    fail(`${label} must be an HTTPS URL without credentials or a custom port`);
+  }
+  return url;
 }
 
-async function fetchBytes(url: string): Promise<Uint8Array> {
-  const response = await fetch(url, {
-    headers: { "User-Agent": "pyr-release-integrity/1" },
-  });
-  if (!response.ok) fail(`GET ${url} failed: ${response.status}`);
-  return new Uint8Array(await response.arrayBuffer());
+async function discardResponse(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // The response is already closed or locked. There is nothing more to consume.
+  }
+}
+
+function safeNetworkError(error: unknown): string {
+  if (error instanceof DOMException && error.name === "TimeoutError") return "request timed out";
+  if (error instanceof Error && error.name.length > 0) return error.name;
+  return "unknown error";
+}
+
+/**
+ * Fetch one exact GitHub API or release-asset URL. API redirects are forbidden;
+ * release bytes may take GitHub's single documented CDN hop and no other one.
+ */
+export async function fetchWithReleasePolicy(
+  value: string,
+  kind: "github-api" | "release-asset",
+  fetcher: FetchLike = fetch,
+): Promise<Response> {
+  const initial = exactHttpsUrl(value, "request URL");
+  const expectedInitialHost = kind === "github-api" ? "api.github.com" : "github.com";
+  if (initial.hostname !== expectedInitialHost) {
+    fail(`${kind} URL must use ${expectedInitialHost}`);
+  }
+  const displayUrl = `${initial.origin}${initial.pathname}`;
+  let current = initial;
+
+  for (let redirectCount = 0;; redirectCount++) {
+    let response: Response;
+    try {
+      response = await fetcher(current, {
+        headers: kind === "github-api"
+          ? {
+            Accept: "application/vnd.github+json",
+            "User-Agent": "pyr-release-integrity/1",
+          }
+          : { "User-Agent": "pyr-release-integrity/1" },
+        redirect: "manual",
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+    } catch (error) {
+      fail(`GET ${displayUrl} network failure: ${safeNetworkError(error)}`);
+    }
+
+    if (!REDIRECT_STATUSES.has(response.status)) return response;
+
+    const location = response.headers.get("location");
+    await discardResponse(response);
+    if (kind === "github-api") fail(`GET ${displayUrl} refused an API redirect`);
+    if (redirectCount !== 0) fail(`GET ${displayUrl} exceeded its single allowed redirect`);
+    if (!location) fail(`GET ${displayUrl} returned a redirect without Location`);
+
+    let destination: URL;
+    try {
+      destination = new URL(location, current);
+    } catch {
+      fail(`GET ${displayUrl} returned an invalid redirect URL`);
+    }
+    if (
+      destination.protocol !== "https:" ||
+      destination.hostname !== "release-assets.githubusercontent.com" ||
+      destination.username !== "" || destination.password !== "" || destination.port !== ""
+    ) {
+      fail(`GET ${displayUrl} refused a redirect outside GitHub's release-asset CDN`);
+    }
+    current = destination;
+  }
+}
+
+async function requireSuccessfulResponse(response: Response, displayUrl: string): Promise<void> {
+  if (response.ok) return;
+  const retryAfter = response.headers.get("retry-after");
+  const remaining = response.headers.get("x-ratelimit-remaining");
+  const reset = response.headers.get("x-ratelimit-reset");
+  const bodyPrefix = response.status === 403 || response.status === 429
+    ? await readErrorBodyPrefix(response, 500)
+    : "";
+  const secondary = /secondary rate limit/i.test(bodyPrefix);
+  const rateLimited = response.status === 429 ||
+    (response.status === 403 && (remaining === "0" || retryAfter !== null || secondary));
+  if (response.status !== 403 && response.status !== 429) await discardResponse(response);
+  if (rateLimited) {
+    const hints = [
+      secondary ? "secondary" : undefined,
+      retryAfter && /^\d+$/.test(retryAfter) ? `retry-after=${retryAfter}s` : undefined,
+      reset && /^\d+$/.test(reset) ? `reset=${reset}` : undefined,
+    ].filter((value): value is string => value !== undefined);
+    fail(
+      `GET ${displayUrl} rate limited (${response.status}${
+        hints.length > 0 ? `; ${hints.join(", ")}` : ""
+      })`,
+    );
+  }
+  fail(`GET ${displayUrl} failed: ${response.status}`);
+}
+
+async function readErrorBodyPrefix(response: Response, maximumBytes: number): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (total < maximumBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const remaining = maximumBytes - total;
+      const prefix = value.subarray(0, remaining);
+      chunks.push(prefix.slice());
+      total += prefix.byteLength;
+      if (prefix.byteLength < value.byteLength || total === maximumBytes) {
+        await reader.cancel();
+        break;
+      }
+    }
+  } catch {
+    try {
+      await reader.cancel();
+    } catch {
+      // A failed body read is not allowed to hide the HTTP status.
+    }
+    return "";
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+function contentLength(response: Response, displayUrl: string): number | undefined {
+  const value = response.headers.get("content-length");
+  if (value === null) return undefined;
+  if (!/^\d+$/.test(value)) fail(`GET ${displayUrl} returned an invalid Content-Length`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) fail(`GET ${displayUrl} returned an unsafe Content-Length`);
+  return parsed;
+}
+
+async function readBoundedBody(
+  response: Response,
+  displayUrl: string,
+  maximumBytes: number,
+  exactBytes?: number,
+): Promise<Uint8Array> {
+  const declared = contentLength(response, displayUrl);
+  if (declared !== undefined && declared > maximumBytes) {
+    await discardResponse(response);
+    fail(`GET ${displayUrl} exceeds the ${maximumBytes}-byte response limit`);
+  }
+  if (exactBytes !== undefined && declared !== undefined && declared !== exactBytes) {
+    await discardResponse(response);
+    fail(`GET ${displayUrl} Content-Length changed`);
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    if (exactBytes !== undefined && exactBytes !== 0) fail(`GET ${displayUrl} returned no body`);
+    return new Uint8Array();
+  }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maximumBytes) {
+        await reader.cancel();
+        fail(`GET ${displayUrl} exceeds the ${maximumBytes}-byte response limit`);
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    try {
+      await reader.cancel();
+    } catch {
+      // Preserve the read failure below.
+    }
+    if (error instanceof Error && error.message.startsWith(`GET ${displayUrl} exceeds`)) {
+      throw error;
+    }
+    fail(`GET ${displayUrl} body read failed: ${safeNetworkError(error)}`);
+  }
+  if (exactBytes !== undefined && total !== exactBytes) {
+    fail(`GET ${displayUrl} response byte length changed`);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+export async function fetchGitHubJson(
+  url: string,
+  fetcher: FetchLike = fetch,
+): Promise<unknown> {
+  const parsed = exactHttpsUrl(url, "GitHub API URL");
+  const displayUrl = `${parsed.origin}${parsed.pathname}`;
+  const response = await fetchWithReleasePolicy(url, "github-api", fetcher);
+  await requireSuccessfulResponse(response, displayUrl);
+  const bytes = await readBoundedBody(response, displayUrl, MAX_API_RESPONSE_BYTES);
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch (error) {
+    fail(`GET ${displayUrl} returned invalid JSON: ${safeNetworkError(error)}`);
+  }
+}
+
+export async function fetchPinnedBytes(
+  url: string,
+  expectedBytes: number,
+  fetcher: FetchLike = fetch,
+): Promise<Uint8Array> {
+  if (!Number.isSafeInteger(expectedBytes) || expectedBytes < 0) {
+    fail("expected response size must be a non-negative safe integer");
+  }
+  const parsed = exactHttpsUrl(url, "release asset URL");
+  const displayUrl = `${parsed.origin}${parsed.pathname}`;
+  const response = await fetchWithReleasePolicy(url, "release-asset", fetcher);
+  await requireSuccessfulResponse(response, displayUrl);
+  return await readBoundedBody(response, displayUrl, expectedBytes, expectedBytes);
 }
 
 export async function verifyPublishedRelease(
@@ -652,18 +925,21 @@ export async function verifyPublishedRelease(
   const repository = manifest.release.repository;
   const tag = manifest.release.tag;
   const apiBase = `https://api.github.com/repos/${repository}`;
-  const release = await fetchJson(`${apiBase}/releases/tags/${tag}`);
-  const ref = await fetchJson(`${apiBase}/git/ref/tags/${tag}`);
+  const release = await fetchGitHubJson(`${apiBase}/releases/tags/${tag}`);
+  const ref = await fetchGitHubJson(`${apiBase}/git/ref/tags/${tag}`);
   validatePublishedMetadata(manifest, release, ref);
 
-  const checksumBytes = await fetchBytes(manifest.checksumManifest.url);
+  const checksumBytes = await fetchPinnedBytes(
+    manifest.checksumManifest.url,
+    manifest.checksumManifest.size,
+  );
   await verifyChecksumManifest(manifest, checksumBytes);
   console.log(
     `verified ${repository} ${tag}: release metadata, tag commit, and ${manifest.checksumManifest.name}`,
   );
 
   for (const asset of selected) {
-    const archive = await fetchBytes(asset.url);
+    const archive = await fetchPinnedBytes(asset.url, asset.archive.size);
     const verified = await verifyAssetArchive(asset, archive);
     console.log(
       `verified ${asset.name}: archive ${verified.archiveSha256}; executable ${verified.executableSha256}; ${asset.architecture}`,
