@@ -927,7 +927,8 @@ interface TableSpan {
 // bare key may be quoted. `[project]`, `[ project ]` and `["project"]` are the
 // same table, so a locator that only accepts the first is not reading TOML, it
 // is matching one preferred spelling of it.
-const PROJECT_HEADER_RE = /^[ \t]*\[[ \t]*(?:project|"project"|'project')[ \t]*\][ \t]*(?:#[^\n]*)?$/m;
+const PROJECT_HEADER_RE =
+  /^[ \t]*\[[ \t]*(?:project|"project"|'project')[ \t]*\][ \t]*(?:#[^\n]*)?$/m;
 const ANY_HEADER_RE = /^[ \t]*\[[^\n]*\]/m;
 
 function locateProjectTable(text: string): TableSpan | null {
