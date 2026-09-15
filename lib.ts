@@ -681,14 +681,28 @@ function githubToken(): string | undefined {
  *  permissions nor pyr: unauthenticated api.github.com allows 60 requests an
  *  hour per IP, and every GitHub-hosted runner on the platform shares that
  *  pool, so a CI job can pass and then fail on identical bytes minutes later.
- *  The rate limit headers say which it was, so say it rather than making the
- *  next person guess. */
-function describeGithubFailure(resp: Response): string {
+ *
+ *  GitHub throttles in two ways and they look different on the wire. The
+ *  primary limit sets x-ratelimit-remaining to 0 and says when it resets. A
+ *  secondary limit does not: remaining can be nonzero or absent, retry-after
+ *  is sent only sometimes, and the one dependable signal is the phrase in the
+ *  body. Checking only remaining therefore reports a secondary limit as an
+ *  ordinary refusal, which is the exact ambiguity this exists to remove, so
+ *  all three signals are read and the body is taken in preference to guessing.
+ *  Ordered deliberately: retry-after is GitHub's own instruction and wins. */
+function describeGithubFailure(resp: Response, body: string): string {
   const remaining = resp.headers.get("x-ratelimit-remaining");
   const limit = resp.headers.get("x-ratelimit-limit");
   const reset = resp.headers.get("x-ratelimit-reset");
+  const retryAfter = resp.headers.get("retry-after");
   const authed = githubToken() ? "authenticated" : "unauthenticated";
-  if ((resp.status === 403 || resp.status === 429) && remaining === "0") {
+  const throttled = resp.status === 403 || resp.status === 429;
+  if (!throttled) return authed;
+
+  if (retryAfter) {
+    return `rate limited (${authed}): GitHub asks for ${retryAfter}s before retrying`;
+  }
+  if (remaining === "0") {
     const resetAt = reset
       ? new Date(Number(reset) * 1000).toISOString().replace(/\.\d+Z$/, "Z")
       : "an unstated time";
@@ -696,6 +710,11 @@ function describeGithubFailure(resp: Response): string {
       ? "this token's budget is spent; wait for the reset"
       : "set GITHUB_TOKEN or GH_TOKEN to move off the shared per-IP pool";
     return `rate limited (${authed}, ${limit ?? "?"} per hour, resets ${resetAt}): ${fix}`;
+  }
+  // GitHub does not always send retry-after for a secondary limit, so the
+  // body is the only thing left that distinguishes it from a real refusal.
+  if (/secondary rate limit/i.test(body)) {
+    return `secondary rate limit (${authed}): wait at least a minute, then back off further if it repeats`;
   }
   return authed;
 }
@@ -1413,8 +1432,16 @@ async function installPythonLocked(triple: string, pin?: PythonPin): Promise<str
   );
 
   if (!resp.ok) {
-    await resp.body?.cancel();
-    const why = describeGithubFailure(resp);
+    // Read rather than cancel: a secondary rate limit is only identifiable
+    // from the body, and it is bounded because nothing here needs more than
+    // the phrase. Failing to read must not mask the status being reported.
+    let body = "";
+    try {
+      body = (await resp.text()).slice(0, 500);
+    } catch {
+      // A body that cannot be read tells us nothing; the status still can.
+    }
+    const why = describeGithubFailure(resp, body);
     if (pin?.build) {
       throw new Error(
         `requested python build ${pin.build} is unavailable (github api: ${resp.status}, ${why}); ` +
