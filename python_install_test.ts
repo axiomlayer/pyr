@@ -335,6 +335,30 @@ Deno.test("Python installation preserves the live runtime until replacement is v
       }
       await assertPreserved();
     });
+    // GitHub throttles in two ways and only one sets remaining to 0. A
+    // secondary limit is identifiable by retry-after when it is sent and by
+    // the body phrase when it is not, so both paths are pinned; reporting one
+    // of these as an ordinary refusal is the ambiguity this all exists to end.
+    await t.step("retry-after is reported as GitHub's own instruction", async () => {
+      await reset();
+      releaseResponse = () =>
+        new Response("slow down", { status: 403, headers: { "retry-after": "60" } });
+      const error = await assertRejects(() => upgrade(["--python"]), Error);
+      assertStringIncludes(error.message, "GitHub asks for 60s before retrying");
+      await assertPreserved();
+    });
+    await t.step("a secondary limit with no headers is read from the body", async () => {
+      await reset();
+      releaseResponse = () =>
+        new Response(
+          JSON.stringify({ message: "You have exceeded a secondary rate limit" }),
+          { status: 403, headers: { "x-ratelimit-remaining": "4999" } },
+        );
+      const error = await assertRejects(() => upgrade(["--python"]), Error);
+      assertStringIncludes(error.message, "secondary rate limit");
+      assertStringIncludes(error.message, "wait at least a minute");
+      await assertPreserved();
+    });
     await t.step("a 403 that is not a rate limit does not blame the token", async () => {
       await reset();
       releaseResponse = () =>
