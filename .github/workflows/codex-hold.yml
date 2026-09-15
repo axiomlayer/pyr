@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
-      - uses: actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71 # v9.0.0
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             if (!['opened', 'reopened'].includes(context.payload.action)) {
@@ -27,8 +27,8 @@ jobs:
             const BOTS = new Set(['chatgpt-codex-connector[bot]']);
             const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-            await sleep(60000);
-            const deadline = Date.now() + 25 * 60 * 1000;
+            const GRACE = Date.now() + 5 * 60 * 1000;
+            const HOLD = Date.now() + 25 * 60 * 1000;
             let sawEyes = false;
 
             while (true) {
@@ -38,11 +38,11 @@ jobs:
               const byBot = reactions.filter(r => BOTS.has(r.user?.login));
 
               if (byBot.some(r => r.content === '+1')) {
-                core.info('Codex cleared this PR (👍). Releasing hold.');
+                core.info('Codex cleared this PR (👍). Releasing.');
                 return;
               }
 
-              const [issueComments, reviewComments, reviews] = await Promise.all([
+              const [ic, rc, rv] = await Promise.all([
                 github.paginate(github.rest.issues.listComments,
                   { owner, repo, issue_number: n, per_page: 100 }),
                 github.paginate(github.rest.pulls.listReviewComments,
@@ -50,20 +50,21 @@ jobs:
                 github.paginate(github.rest.pulls.listReviews,
                   { owner, repo, pull_number: n, per_page: 100 }),
               ]);
-              if ([...issueComments, ...reviewComments, ...reviews]
-                    .some(c => BOTS.has(c.user?.login))) {
-                core.info('Codex left feedback. Releasing hold, thread resolution now gates.');
+              if ([...ic, ...rc, ...rv].some(c => BOTS.has(c.user?.login))) {
+                core.info('Codex left feedback. Releasing, thread resolution now gates.');
                 return;
               }
 
               if (byBot.some(r => r.content === 'eyes')) sawEyes = true;
-              if (!sawEyes) {
-                core.info('No 👀 from Codex, not watching this PR. Releasing hold.');
+
+              if (!sawEyes && Date.now() > GRACE) {
+                core.info('No 👀 within 5 minutes, Codex is not watching. Releasing.');
                 return;
               }
-              if (Date.now() > deadline) {
-                core.warning('Codex acknowledged (👀) but returned no verdict in 25 minutes. Releasing, review capacity may be exhausted.');
+              if (sawEyes && Date.now() > HOLD) {
+                core.warning('Codex acknowledged (👀) but gave no verdict in 25 minutes. Releasing, review capacity may be exhausted.');
                 return;
               }
-              await sleep(30000);
+
+              await sleep(15000);
             }
