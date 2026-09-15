@@ -1,7 +1,7 @@
 import denoConfig from "./deno.json" with { type: "json" };
 
 export const PYR_VERSION: string = denoConfig.version;
-export const PYR_REPO = "jasenc7/pyr";
+export const PYR_REPO = "axiomlayer/pyr";
 
 /** The user's home directory. Native Windows prefers USERPROFILE so an MSYS
  *  HOME such as /c/Users/name cannot redirect a Windows binary into a
