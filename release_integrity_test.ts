@@ -248,6 +248,8 @@ async function assetFixture(
 Deno.test("checked-in release manifest is complete and contains no mutable endpoint", async () => {
   const manifest = await loadReleaseManifest(manifestUrl);
   assertEquals(manifest.assets.length, 6);
+  assertEquals(manifest.release.repository, "axiomlayer/pyr");
+  assertEquals(manifest.ownership.currentOwner, "axiomlayer");
   assertEquals(manifest.ownership.promotionTargetOwner, "axiomlayer");
   assertEquals(manifest.ownership.fleetConsumption, "source-evidence-only");
   const serialized = JSON.stringify(manifest);
@@ -257,7 +259,8 @@ Deno.test("checked-in release manifest is complete and contains no mutable endpo
 
 Deno.test("manifest validation refuses a mutable release URL", async () => {
   const raw = JSON.parse(await Deno.readTextFile(manifestUrl));
-  raw.checksumManifest.url = "https://github.com/jasenc7/pyr/releases/latest/download/SHA256SUMS";
+  raw.checksumManifest.url =
+    "https://github.com/axiomlayer/pyr/releases/latest/download/SHA256SUMS";
   assertThrows(
     () => parseReleaseManifest(raw),
     Error,
@@ -523,7 +526,7 @@ Deno.test("release bytes allow only one GitHub CDN redirect and never send autho
     return response ? Promise.resolve(response) : Promise.reject(new Error("unexpected fetch"));
   };
   const bytes = await fetchPinnedBytes(
-    "https://github.com/jasenc7/pyr/releases/download/v0.1.1/SHA256SUMS",
+    "https://github.com/axiomlayer/pyr/releases/download/v0.1.1/SHA256SUMS",
     3,
     fetcher,
   );
@@ -550,19 +553,19 @@ Deno.test("GitHub API authentication stays on the exact API request", async () =
     return Promise.resolve(new Response("{}"));
   };
   await fetchGitHubJson(
-    "https://api.github.com/repos/jasenc7/pyr/releases/tags/v0.1.1",
+    "https://api.github.com/repos/axiomlayer/pyr/releases/tags/v0.1.1",
     fetcher,
     "fabricated-ci-token",
   );
   assertEquals(requests, [{
     authorization: "Bearer fabricated-ci-token",
     apiVersion: "2022-11-28",
-    url: "https://api.github.com/repos/jasenc7/pyr/releases/tags/v0.1.1",
+    url: "https://api.github.com/repos/axiomlayer/pyr/releases/tags/v0.1.1",
   }]);
 
   let assetAuthorization: string | null | undefined;
   await fetchWithReleasePolicy(
-    "https://github.com/jasenc7/pyr/releases/download/v0.1.1/SHA256SUMS",
+    "https://github.com/axiomlayer/pyr/releases/download/v0.1.1/SHA256SUMS",
     "release-asset",
     (_input, init) => {
       assetAuthorization = new Headers(init?.headers).get("authorization");
@@ -574,7 +577,7 @@ Deno.test("GitHub API authentication stays on the exact API request", async () =
 });
 
 Deno.test("network policy refuses API and off-CDN redirects", async () => {
-  const apiUrl = "https://api.github.com/repos/jasenc7/pyr/releases/tags/v0.1.1";
+  const apiUrl = "https://api.github.com/repos/axiomlayer/pyr/releases/tags/v0.1.1";
   await assertRejects(
     () =>
       fetchWithReleasePolicy(
@@ -593,7 +596,7 @@ Deno.test("network policy refuses API and off-CDN redirects", async () => {
   await assertRejects(
     () =>
       fetchPinnedBytes(
-        "https://github.com/jasenc7/pyr/releases/download/v0.1.1/SHA256SUMS",
+        "https://github.com/axiomlayer/pyr/releases/download/v0.1.1/SHA256SUMS",
         1,
         sequenceFetch([
           new Response(null, {
@@ -608,7 +611,7 @@ Deno.test("network policy refuses API and off-CDN redirects", async () => {
   await assertRejects(
     () =>
       fetchPinnedBytes(
-        "https://github.com/jasenc7/pyr/releases/download/v0.1.1/SHA256SUMS",
+        "https://github.com/axiomlayer/pyr/releases/download/v0.1.1/SHA256SUMS",
         1,
         sequenceFetch([
           new Response(null, {
@@ -627,7 +630,7 @@ Deno.test("network policy refuses API and off-CDN redirects", async () => {
 });
 
 Deno.test("network failures and rate limits fail closed without retrying", async () => {
-  const apiUrl = "https://api.github.com/repos/jasenc7/pyr/releases/tags/v0.1.1";
+  const apiUrl = "https://api.github.com/repos/axiomlayer/pyr/releases/tags/v0.1.1";
   await assertRejects(
     () => fetchGitHubJson(apiUrl, sequenceFetch([new TypeError("offline")])),
     Error,
@@ -701,7 +704,7 @@ Deno.test("network failures and rate limits fail closed without retrying", async
 });
 
 Deno.test("network response bounds reject declared and streamed size mismatches", async () => {
-  const url = "https://github.com/jasenc7/pyr/releases/download/v0.1.1/SHA256SUMS";
+  const url = "https://github.com/axiomlayer/pyr/releases/download/v0.1.1/SHA256SUMS";
   await assertRejects(
     () =>
       fetchPinnedBytes(
@@ -736,7 +739,7 @@ Deno.test("network response bounds reject declared and streamed size mismatches"
   );
 });
 
-Deno.test("persistent Windows runners have a trusted-only workflow and exact host routing", async () => {
+Deno.test("hosted and persistent Windows proof use native, trusted routing", async () => {
   const hosted = (await Deno.readTextFile(".github/workflows/release-integrity.yml")).replaceAll(
     "\r\n",
     "\n",
@@ -758,12 +761,40 @@ Deno.test("persistent Windows runners have a trusted-only workflow and exact hos
   assertEquals(native.includes("- host: siberian\n            architecture: x86_64"), true);
   assertEquals(hosted.includes("runner: ubuntu-24.04-arm"), true);
   assertEquals(hosted.includes("runner: macos-15-intel"), true);
+  assertEquals(
+    hosted.includes("runner: windows-latest\n            asset: windows-x86_64"),
+    true,
+  );
+  assertEquals(
+    hosted.includes("runner: windows-11-arm\n            asset: windows-aarch64"),
+    true,
+  );
+  assertEquals(hosted.includes("scripts\\verify-native-windows.ps1"), true);
   for (const workflow of [hosted, native]) {
     assertEquals(workflow.includes("environment:"), false);
     assertEquals(workflow.includes("secrets."), false);
     assertEquals(workflow.includes("codex_security_gate"), false);
     assertEquals(workflow.includes("releases/latest"), false);
     assertEquals(workflow.includes("latest/download"), false);
+  }
+});
+
+Deno.test("release workflows pin every external action to an immutable commit", async () => {
+  for (
+    const path of [
+      ".github/workflows/ci.yml",
+      ".github/workflows/release-integrity.yml",
+      ".github/workflows/release-integrity-native-windows.yml",
+    ]
+  ) {
+    const workflow = (await Deno.readTextFile(path)).replaceAll("\r\n", "\n");
+    for (const match of workflow.matchAll(/^\s*-?\s*uses:\s+([^\s#]+)/gm)) {
+      const reference = match[1];
+      if (reference.startsWith("./")) continue;
+      if (!/^[^@\s]+@[0-9a-f]{40}$/.test(reference)) {
+        throw new Error(`${path} has a mutable action reference: ${reference}`);
+      }
+    }
   }
 });
 

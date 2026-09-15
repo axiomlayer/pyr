@@ -5,7 +5,7 @@ Installs pyr on Windows.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$Repo = "jasenc7/pyr"
+$Repo = "axiomlayer/pyr"
 $PyrHome = if ($env:PYR_HOME) { $env:PYR_HOME } else { Join-Path $env:USERPROFILE ".pyr" }
 $InstallDir = Join-Path $PyrHome "bin"
 # The Windows install_only layout puts python.exe at the root of the managed

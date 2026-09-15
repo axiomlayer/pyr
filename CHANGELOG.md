@@ -3,6 +3,11 @@
 - Release evidence independently pins published asset identity, ZIP bytes, and extracted executable
   bytes; bounded scheduled checks re-download all six targets, run Linux/macOS binaries on hosted
   native architectures, and run Windows ARM64/x86_64 on trusted Ocelot/Siberian fleet runners
+- Release evidence follows the canonical AxiomLayer owner after the repository transfer, and
+  GitHub-hosted native Windows runners execute both published Windows architectures independently of
+  fleet-runner enrollment
+- Every external action in the build, release, and integrity workflows is pinned to an immutable
+  commit rather than a movable version tag
 - `pyr upgrade --python X.Y.Z[+BUILD]` installs only the requested CPython version/build and fails
   closed when it is unavailable, while retaining checksum verification, locking, and rollback
 - Managed Python upgrades track the exact upstream build, so same-version rebuilds are not skipped

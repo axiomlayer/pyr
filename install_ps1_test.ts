@@ -1,8 +1,16 @@
 import { assert, assertMatch } from "https://deno.land/std@0.224.0/assert/mod.ts";
 
+// Test-only sentinel: live code must never depend on GitHub's retired-owner redirect.
+const retiredOwnerRepository = "jasenc7/pyr";
+
 Deno.test("Windows installer selects a published asset and handles old ARM releases", async () => {
   const script = await Deno.readTextFile(
     new URL("./site/assets/install.ps1", import.meta.url),
+  );
+  assertMatch(script, /\$Repo = "axiomlayer\/pyr"/);
+  assert(
+    !script.includes(retiredOwnerRepository),
+    "installer must not depend on the retired owner redirect",
   );
   assertMatch(script, /\$Release\.assets/);
   assertMatch(script, /windows-aarch64/);
@@ -22,6 +30,11 @@ Deno.test("Windows installer selects a published asset and handles old ARM relea
 Deno.test("POSIX installer is HTTPS-only and redirects Windows compatibility shells", async () => {
   const script = await Deno.readTextFile(
     new URL("./site/assets/install.sh", import.meta.url),
+  );
+  assertMatch(script, /REPO="axiomlayer\/pyr"/);
+  assert(
+    !script.includes(retiredOwnerRepository),
+    "installer must not depend on the retired owner redirect",
   );
   assertMatch(script, /mingw\*\|msys\*\|cygwin\*/);
   assertMatch(script, /run install\.ps1 from PowerShell/);

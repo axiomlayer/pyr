@@ -19,6 +19,7 @@ import {
   platformTripleFor,
   protectedInitDir,
   pyproject,
+  PYR_REPO,
   pyrHome,
   readLock,
   readPyprojectDeps,
@@ -33,6 +34,10 @@ import {
 } from "./lib.ts";
 
 // --- unit tests ---
+
+Deno.test("release API targets the canonical AxiomLayer repository", () => {
+  assertEquals(PYR_REPO, "axiomlayer/pyr");
+});
 
 Deno.test("release checksum parsing matches exact assets", () => {
   const digest = "a".repeat(64);

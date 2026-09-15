@@ -42,4 +42,4 @@ Add any other context about the problem here (e.g., logs, screenshots).
 ---
 
 **Note:** If this is a **feature request**, open a
-[Discussion](https://github.com/jasenc7/pyr/discussions) instead.
+[Discussion](https://github.com/axiomlayer/pyr/discussions) instead.

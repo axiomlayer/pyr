@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPO="jasenc7/pyr"
+REPO="axiomlayer/pyr"
 INSTALL_DIR="${PYR_HOME:-$HOME/.pyr}/bin"
 PYTHON_DIR="${PYR_HOME:-$HOME/.pyr}/python/bin"
 
