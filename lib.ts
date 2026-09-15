@@ -666,6 +666,16 @@ async function downloadFile(url: string, path: string, failure: string): Promise
   }
 }
 
+/** GitHub tooling is split on the name: the gh CLI and this fleet's dotfiles
+ *  workflow set GH_TOKEN, while GitHub Actions and .agentic-dotfiles set
+ *  GITHUB_TOKEN. Reading only one means a token can be present and silently
+ *  unused, which looks exactly like having no token at all: an unauthenticated
+ *  call onto the shared per-IP pool. Both are accepted, and every caller goes
+ *  through here so the rate-limit message cannot disagree with the request. */
+function githubToken(): string | undefined {
+  return Deno.env.get("GITHUB_TOKEN") || Deno.env.get("GH_TOKEN") || undefined;
+}
+
 /** What a non-2xx from the GitHub API actually was. "403" on its own sends a
  *  reader looking for a permissions problem, and the common cause is neither
  *  permissions nor pyr: unauthenticated api.github.com allows 60 requests an
@@ -677,14 +687,14 @@ function describeGithubFailure(resp: Response): string {
   const remaining = resp.headers.get("x-ratelimit-remaining");
   const limit = resp.headers.get("x-ratelimit-limit");
   const reset = resp.headers.get("x-ratelimit-reset");
-  const authed = Deno.env.get("GITHUB_TOKEN") ? "authenticated" : "unauthenticated";
+  const authed = githubToken() ? "authenticated" : "unauthenticated";
   if ((resp.status === 403 || resp.status === 429) && remaining === "0") {
     const resetAt = reset
       ? new Date(Number(reset) * 1000).toISOString().replace(/\.\d+Z$/, "Z")
       : "an unstated time";
-    const fix = Deno.env.get("GITHUB_TOKEN")
+    const fix = githubToken()
       ? "this token's budget is spent; wait for the reset"
-      : "set GITHUB_TOKEN to move off the shared per-IP pool";
+      : "set GITHUB_TOKEN or GH_TOKEN to move off the shared per-IP pool";
     return `rate limited (${authed}, ${limit ?? "?"} per hour, resets ${resetAt}): ${fix}`;
   }
   return authed;
@@ -694,7 +704,7 @@ function githubHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     Accept: "application/vnd.github.v3+json",
   };
-  const token = Deno.env.get("GITHUB_TOKEN");
+  const token = githubToken();
   if (token) {
     headers["Authorization"] = `Bearer ${token}`;
   }
