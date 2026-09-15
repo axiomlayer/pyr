@@ -278,8 +278,12 @@ Deno.test("Python installation preserves the live runtime until replacement is v
     // refusal, and which one it is decides what the human does next.
     await t.step("an exhausted shared pool names the token as the fix", async () => {
       await reset();
-      const before = Deno.env.get("GITHUB_TOKEN");
+      // Both names are cleared, not just one: pyr accepts either, so leaving
+      // GH_TOKEN set would make this step report "authenticated" on a runner
+      // that happens to export it and pass or fail by environment.
+      const before = { gh: Deno.env.get("GH_TOKEN"), github: Deno.env.get("GITHUB_TOKEN") };
       Deno.env.delete("GITHUB_TOKEN");
+      Deno.env.delete("GH_TOKEN");
       try {
         releaseResponse = () =>
           new Response("rate limited", {
@@ -295,8 +299,39 @@ Deno.test("Python installation preserves the live runtime until replacement is v
         assertStringIncludes(error.message, "set GITHUB_TOKEN");
         assertStringIncludes(error.message, "2026-09-15T00:00:00Z");
       } finally {
-        if (before === undefined) Deno.env.delete("GITHUB_TOKEN");
-        else Deno.env.set("GITHUB_TOKEN", before);
+        for (
+          const [name, value] of [["GH_TOKEN", before.gh], ["GITHUB_TOKEN", before.github]] as const
+        ) {
+          if (value === undefined) Deno.env.delete(name);
+          else Deno.env.set(name, value);
+        }
+      }
+      await assertPreserved();
+    });
+    // The fleet is split on the name: dotfiles' workflow exports GH_TOKEN and
+    // .agentic-dotfiles' exports GITHUB_TOKEN. Reading only one would make a
+    // token that is present look like no token at all.
+    await t.step("GH_TOKEN alone counts as authenticated", async () => {
+      await reset();
+      const before = { gh: Deno.env.get("GH_TOKEN"), github: Deno.env.get("GITHUB_TOKEN") };
+      Deno.env.delete("GITHUB_TOKEN");
+      Deno.env.set("GH_TOKEN", "stand-in");
+      try {
+        releaseResponse = () =>
+          new Response("rate limited", {
+            status: 403,
+            headers: { "x-ratelimit-remaining": "0", "x-ratelimit-limit": "5000" },
+          });
+        const error = await assertRejects(() => upgrade(["--python"]), Error);
+        assertStringIncludes(error.message, "rate limited (authenticated");
+        assertStringIncludes(error.message, "budget is spent");
+      } finally {
+        for (
+          const [name, value] of [["GH_TOKEN", before.gh], ["GITHUB_TOKEN", before.github]] as const
+        ) {
+          if (value === undefined) Deno.env.delete(name);
+          else Deno.env.set(name, value);
+        }
       }
       await assertPreserved();
     });
